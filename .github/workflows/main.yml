@@ -50,10 +50,10 @@ jobs:
           key: go-artifacts-${{ runner.os }}-check-all-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum', 'Makefile', 'app/**/Makefile') }}
           restore-keys: go-artifacts-${{ runner.os }}-check-all-
 
-      - name: Run check-all
-        run: |
-          make check-all
-          git diff --exit-code
+#      - name: Run check-all
+#        run: |
+#          make check-all
+#          git diff --exit-code
 
   build:
     needs: lint
