@@ -76,6 +76,8 @@ var (
 		"See https://docs.victoriametrics.com/Single-server-VictoriaMetrics.html#cache-tuning")
 	cacheSizeIndexDBTagFilters = flagutil.NewBytes("storage.cacheSizeIndexDBTagFilters", 0, "Overrides max size for indexdb/tagFiltersToMetricIDs cache. "+
 		"See https://docs.victoriametrics.com/Single-server-VictoriaMetrics.html#cache-tuning")
+	forceReadOnly = flag.Bool("storage.forceReadOnly", false, "Force vmstorage into read-only mode. "+
+		"May be useful when running vmstorage on read-only FS")
 )
 
 func main() {
@@ -100,8 +102,12 @@ func main() {
 		logger.Fatalf("-retentionPeriod cannot be smaller than a day; got %s", retentionPeriod)
 	}
 	logger.Infof("opening storage at %q with -retentionPeriod=%s", *storageDataPath, retentionPeriod)
+	if *forceReadOnly {
+		logger.Infof("starting vmstorage as readonly because storage.forceReadOnly flag is set")
+	}
+
 	startTime := time.Now()
-	strg := storage.MustOpenStorage(*storageDataPath, retentionPeriod.Duration(), *maxHourlySeries, *maxDailySeries)
+	strg := storage.MustOpenStorage(*storageDataPath, retentionPeriod.Duration(), *maxHourlySeries, *maxDailySeries, *forceReadOnly)
 	initStaleSnapshotsRemover(strg)
 
 	var m storage.Metrics

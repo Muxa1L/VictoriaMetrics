@@ -164,7 +164,7 @@ type accountProjectKey struct {
 }
 
 // MustOpenStorage opens storage on the given path with the given retentionMsecs.
-func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxDailySeries int) *Storage {
+func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxDailySeries int, forceReadOnly bool) *Storage {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		logger.Panicf("FATAL: cannot determine absolute path for %q: %s", path, err)
@@ -178,22 +178,27 @@ func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxD
 		retentionMsecs: retention.Milliseconds(),
 		stop:           make(chan struct{}),
 	}
-	fs.MustMkdirIfNotExist(path)
-
-	// Check whether the cache directory must be removed
-	// It is removed if it contains resetCacheOnStartupFilename.
-	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/1447 for details.
-	if fs.IsPathExist(filepath.Join(s.cachePath, resetCacheOnStartupFilename)) {
-		logger.Infof("removing cache directory at %q, since it contains `%s` file...", s.cachePath, resetCacheOnStartupFilename)
-		// Do not use fs.MustRemoveAll() here, since the cache directory may be mounted
-		// to a separate filesystem. In this case the fs.MustRemoveAll() will fail while
-		// trying to remove the mount root.
-		fs.RemoveDirContents(s.cachePath)
-		logger.Infof("cache directory at %q has been successfully removed", s.cachePath)
+	if forceReadOnly {
+		s.isReadOnly = 1
 	}
 
 	// Protect from concurrent opens.
-	s.flockF = fs.MustCreateFlockFile(path)
+	if !forceReadOnly {
+		fs.MustMkdirIfNotExist(path)
+
+		// Check whether the cache directory must be removed
+		// It is removed if it contains resetCacheOnStartupFilename.
+		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/1447 for details.
+		if fs.IsPathExist(filepath.Join(s.cachePath, resetCacheOnStartupFilename)) {
+			logger.Infof("removing cache directory at %q, since it contains `%s` file...", s.cachePath, resetCacheOnStartupFilename)
+			// Do not use fs.MustRemoveAll() here, since the cache directory may be mounted
+			// to a separate filesystem. In this case the fs.MustRemoveAll() will fail while
+			// trying to remove the mount root.
+			fs.RemoveDirContents(s.cachePath)
+			logger.Infof("cache directory at %q has been successfully removed", s.cachePath)
+		}
+		s.flockF = fs.MustCreateFlockFile(path)
+	}
 
 	// Check whether restore process finished successfully
 	restoreLockF := filepath.Join(path, backupnames.RestoreInProgressFilename)
@@ -203,9 +208,10 @@ func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxD
 
 	// Pre-create snapshots directory if it is missing.
 	snapshotsPath := filepath.Join(path, snapshotsDirname)
-	fs.MustMkdirIfNotExist(snapshotsPath)
-	fs.MustRemoveTemporaryDirs(snapshotsPath)
-
+	if forceReadOnly {
+		fs.MustMkdirIfNotExist(snapshotsPath)
+		fs.MustRemoveTemporaryDirs(snapshotsPath)
+	}
 	// Initialize series cardinality limiter.
 	if maxHourlySeries > 0 {
 		s.hourlySeriesLimiter = bloomfilter.NewLimiter(maxHourlySeries, time.Hour)
@@ -275,17 +281,19 @@ func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxD
 
 	// check for free disk space before opening the table
 	// to prevent unexpected part merges. See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/4023
-	s.startFreeDiskSpaceWatcher()
+	if !forceReadOnly {
+		s.startFreeDiskSpaceWatcher()
+	}
 
 	// Load data
 	tablePath := filepath.Join(path, dataDirname)
 	tb := mustOpenTable(tablePath, s)
 	s.tb = tb
-
-	s.startCurrHourMetricIDsUpdater()
-	s.startNextDayMetricIDsUpdater()
-	s.startRetentionWatcher()
-
+	if !forceReadOnly {
+		s.startCurrHourMetricIDsUpdater()
+		s.startNextDayMetricIDsUpdater()
+		s.startRetentionWatcher()
+	}
 	return s
 }
 
