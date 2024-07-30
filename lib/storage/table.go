@@ -77,7 +77,7 @@ func (ptw *partitionWrapper) scheduleToDrop() {
 // mustOpenTable opens a table on the given path.
 //
 // The table is created if it doesn't exist.
-func mustOpenTable(path string, s *Storage) *table {
+func mustOpenTable(path string, s *Storage, forceReadOnly bool) *table {
 	path = filepath.Clean(path)
 
 	// Create a directory for the table if it doesn't exist yet.
@@ -89,17 +89,20 @@ func mustOpenTable(path string, s *Storage) *table {
 	fs.MustRemoveTemporaryDirs(smallPartitionsPath)
 
 	smallSnapshotsPath := filepath.Join(smallPartitionsPath, snapshotsDirname)
-	fs.MustMkdirIfNotExist(smallSnapshotsPath)
-	fs.MustRemoveTemporaryDirs(smallSnapshotsPath)
+	if !forceReadOnly {
+		fs.MustMkdirIfNotExist(smallSnapshotsPath)
+		fs.MustRemoveTemporaryDirs(smallSnapshotsPath)
+	}
 
 	bigPartitionsPath := filepath.Join(path, bigDirname)
 	fs.MustMkdirIfNotExist(bigPartitionsPath)
 	fs.MustRemoveTemporaryDirs(bigPartitionsPath)
 
 	bigSnapshotsPath := filepath.Join(bigPartitionsPath, snapshotsDirname)
-	fs.MustMkdirIfNotExist(bigSnapshotsPath)
-	fs.MustRemoveTemporaryDirs(bigSnapshotsPath)
-
+	if !forceReadOnly {
+		fs.MustMkdirIfNotExist(bigSnapshotsPath)
+		fs.MustRemoveTemporaryDirs(bigSnapshotsPath)
+	}
 	// Open partitions.
 	pts := mustOpenPartitions(smallPartitionsPath, bigPartitionsPath, s)
 

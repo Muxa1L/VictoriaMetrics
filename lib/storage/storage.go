@@ -208,7 +208,7 @@ func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxD
 
 	// Pre-create snapshots directory if it is missing.
 	snapshotsPath := filepath.Join(path, snapshotsDirname)
-	if forceReadOnly {
+	if !forceReadOnly {
 		fs.MustMkdirIfNotExist(snapshotsPath)
 		fs.MustRemoveTemporaryDirs(snapshotsPath)
 	}
@@ -246,8 +246,10 @@ func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxD
 	// Load indexdb
 	idbPath := filepath.Join(path, indexdbDirname)
 	idbSnapshotsPath := filepath.Join(idbPath, snapshotsDirname)
-	fs.MustMkdirIfNotExist(idbSnapshotsPath)
-	fs.MustRemoveTemporaryDirs(idbSnapshotsPath)
+	if !forceReadOnly {
+		fs.MustMkdirIfNotExist(idbSnapshotsPath)
+		fs.MustRemoveTemporaryDirs(idbSnapshotsPath)
+	}
 	idbNext, idbCurr, idbPrev := s.mustOpenIndexDBTables(idbPath)
 
 	idbCurr.SetExtDB(idbPrev)
@@ -287,7 +289,7 @@ func MustOpenStorage(path string, retention time.Duration, maxHourlySeries, maxD
 
 	// Load data
 	tablePath := filepath.Join(path, dataDirname)
-	tb := mustOpenTable(tablePath, s)
+	tb := mustOpenTable(tablePath, s, forceReadOnly)
 	s.tb = tb
 	if !forceReadOnly {
 		s.startCurrHourMetricIDsUpdater()

@@ -47,7 +47,7 @@ func openBenchTable(b *testing.B, startTimestamp int64, rowsPerInsert, rowsCount
 		createdBenchTables[path] = true
 	}
 	strg := newTestStorage()
-	tb := mustOpenTable(path, strg)
+	tb := mustOpenTable(path, strg, false)
 
 	// Verify rows count in the table opened from files.
 	insertsCount := uint64((rowsCount + rowsPerInsert - 1) / rowsPerInsert)
@@ -67,7 +67,7 @@ func createBenchTable(b *testing.B, path string, startTimestamp int64, rowsPerIn
 	b.Helper()
 
 	strg := newTestStorage()
-	tb := mustOpenTable(path, strg)
+	tb := mustOpenTable(path, strg, false)
 
 	insertsCount := uint64((rowsCount + rowsPerInsert - 1) / rowsPerInsert)
 	timestamp := uint64(startTimestamp)

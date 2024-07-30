@@ -184,7 +184,7 @@ func testTableSearchEx(t *testing.T, rng *rand.Rand, trData, trSearch TimeRange,
 
 	// Create a table from rowss and test search on it.
 	strg := newTestStorage()
-	tb := mustOpenTable("test-table", strg)
+	tb := mustOpenTable("test-table", strg, false)
 	defer func() {
 		if err := os.RemoveAll("test-table"); err != nil {
 			t.Fatalf("cannot remove table directory: %s", err)
@@ -200,7 +200,7 @@ func testTableSearchEx(t *testing.T, rng *rand.Rand, trData, trSearch TimeRange,
 	tb.MustClose()
 
 	// Open the created table and test search on it.
-	tb = mustOpenTable("test-table", strg)
+	tb = mustOpenTable("test-table", strg, false)
 	testTableSearch(t, tb, tsids, trSearch, rbsExpected, rowsCountExpected)
 	tb.MustClose()
 	stopTestStorage(strg)

@@ -19,14 +19,14 @@ func TestTableOpenClose(t *testing.T) {
 	// Create a new table
 	strg := newTestStorage()
 	strg.retentionMsecs = retention.Milliseconds()
-	tb := mustOpenTable(path, strg)
+	tb := mustOpenTable(path, strg, false)
 
 	// Close it
 	tb.MustClose()
 
 	// Re-open created table multiple times.
 	for i := 0; i < 10; i++ {
-		tb := mustOpenTable(path, strg)
+		tb := mustOpenTable(path, strg, false)
 		tb.MustClose()
 	}
 
