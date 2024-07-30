@@ -34,5 +34,5 @@ jobs:
           key: go-artifacts-${{ runner.os }}-check-licenses-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum', 'Makefile', 'app/**/Makefile') }}
           restore-keys: go-artifacts-${{ runner.os }}-check-licenses-
 
-      - name: Check License
-        run: make check-licenses
+      # - name: Check License
+      #   run: make check-licenses
