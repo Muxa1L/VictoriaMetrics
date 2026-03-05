@@ -22,38 +22,47 @@ Each preset, including the [default](#default), comes with premade downstream as
 
 
 **Available presets:**
+- [UI](#ui)
 - [Default](#default)
 - [Node-Exporter](#node-exporter)
 
 To enable preset mode, `preset` arg should be set to particular preset name:
 
 ```yaml
-preset: "chosen_preset_name"  # i.e. "node-exporter"
+preset: "chosen_preset_name"  # i.e. "node-exporter", "ui", etc.
 ```
 
 Also, additional minimal set of arguments may be required from user to run the preset. See corresponding preset sections below for the details.
 
 Run a service using config file with one of the [available options](https://docs.victoriametrics.com/anomaly-detection/quickstart/#how-to-install-and-run-vmanomaly).
 
-After you run `vmanomaly` with `preset` arg specified, available assets can be viewed, copied and downloaded at `http://localhost:8490/presets/` endpoint.
+## UI
 
-![preset-localhost](presets-localhost.webp)
+The UI preset is the easiest to start from and is designed for users who want to quickly experiment with `vmanomaly` in [UI mode](https://docs.victoriametrics.com/anomaly-detection/ui/). It requires minimal configuration and provides a user-friendly interface for exploring anomaly detection capabilities:
+
+```yaml
+preset: "ui"
+```
+
+Please refer to the [UI documentation](https://docs.victoriametrics.com/anomaly-detection/ui/) for detailed instructions on how to use the interface and [backtest your anomaly detection configurations guide](https://docs.victoriametrics.com/anomaly-detection/ui/#example-usage).
+
+![vmanomaly-ui-overview](vmanomaly-ui-overview.webp)
 
 ## Default
 
 The default preset indicates that the `vmanomaly` service is running in its standard mode — either because the `preset` section is not specified in the configuration or is explicitly set to `default` or `default:vX.Y`.
 
 Since this mode is designed to support **any** configuration, it requires the user to fully define all [necessary configuration sections](https://docs.victoriametrics.com/anomaly-detection/components/), including:  
-- [Reader](https://docs.victoriametrics.com/anomaly-detection/components/reader) (with the required `queries` section)  
-- [Writer](https://docs.victoriametrics.com/anomaly-detection/components/writer)  
-- [Models](https://docs.victoriametrics.com/anomaly-detection/components/models)  
-- [Schedulers](https://docs.victoriametrics.com/anomaly-detection/components/scheduler)
+- [Reader](https://docs.victoriametrics.com/anomaly-detection/components/reader/) (with the required `queries` section)  
+- [Writer](https://docs.victoriametrics.com/anomaly-detection/components/writer/)  
+- [Models](https://docs.victoriametrics.com/anomaly-detection/components/models/)  
+- [Schedulers](https://docs.victoriametrics.com/anomaly-detection/components/scheduler/)
 
 Although this mode is designed to be as flexible as possible, it includes a pre-built [Grafana dashboard](https://grafana.com/grafana/dashboards/22922). This dashboard is based on the [service output](https://docs.victoriametrics.com/anomaly-detection/components/models/#vmanomaly-output), specifically [anomaly scores](https://docs.victoriametrics.com/anomaly-detection/faq/#what-is-anomaly-score), and helps streamline the anomaly drill-down process.  
 
 ### Grafana Dashboard
 
-> [For additional benefits](https://docs.victoriametrics.com/victoriametrics/victoriametrics-datasource/#motivation), this dashboard is based on [VictoriaMetrics datasource](https://docs.victoriametrics.com/victoriametrics/victoriametrics-datasource/) rather than on `Prometheus` datasource. Please follow [these instructions](https://docs.victoriametrics.com/victoriametrics/victoriametrics-datasource/#installation) to enable datasource in Grafana.
+> [For additional benefits](https://docs.victoriametrics.com/victoriametrics/integrations/grafana/datasource/#motivation), this dashboard is based on [VictoriaMetrics datasource](https://docs.victoriametrics.com/victoriametrics/integrations/grafana/datasource/) rather than on `Prometheus` datasource. Please follow [these instructions](https://docs.victoriametrics.com/victoriametrics/integrations/grafana/datasource/#installation) to enable datasource in Grafana.
 
 You can find the Grafana dashboard `.json` file either [here](https://github.com/VictoriaMetrics/VictoriaMetrics/tree/master/deployment/docker/vmanomaly/vmanomaly-default/dashboard.json) or, for already running `vmanomaly` instance: `http://localhost:8490/presets/dashboard.json`. 
 
@@ -142,7 +151,7 @@ To analyze anomalies effectively, start from a high-level overview and progressi
 
 5. **Zoom in on the most anomalous groups:**  
    - Focus on the most affected category (`context_switch` in this case).  
-   - Notice when the anomaly score first exceeded the threshold—around 15:35 in the example.
+   - Notice when the anomaly score first exceeded the threshold — around 15:35 in the example.
 
    ![dashboard-as-example-step-1](vmanomaly-default-dashboard-example-step-1.webp)
 

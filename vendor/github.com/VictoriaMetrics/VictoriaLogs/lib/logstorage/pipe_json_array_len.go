@@ -34,6 +34,14 @@ func (pl *pipeJSONArrayLen) canLiveTail() bool {
 	return true
 }
 
+func (pl *pipeJSONArrayLen) canReturnLastNResults() bool {
+	return pl.resultField != "_time"
+}
+
+func (pl *pipeJSONArrayLen) isFixedOutputFieldsOrder() bool {
+	return false
+}
+
 func (pl *pipeJSONArrayLen) updateNeededFields(pf *prefixfilter.Filter) {
 	if pf.MatchString(pl.resultField) {
 		pf.AddDenyFilter(pl.resultField)

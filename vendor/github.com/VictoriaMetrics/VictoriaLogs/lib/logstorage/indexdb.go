@@ -46,6 +46,27 @@ type IndexdbStats struct {
 
 	// IndexdbPartsCount is the number of parts in indexdb.
 	IndexdbPartsCount uint64
+
+	// IndexdbPendingItems is the number of pending items in IndexedDB before they are merged into the part.
+	IndexdbPendingItems uint64
+
+	// IndexdbActiveFileMerges is the number of active merges in indexdb.
+	IndexdbActiveFileMerges uint64
+
+	// IndexdbActiveInmemoryMerges is the number of active merges in indexdb.
+	IndexdbActiveInmemoryMerges uint64
+
+	// IndexdbFileMergesCount is the number of merges in indexdb.
+	IndexdbFileMergesCount uint64
+
+	// IndexdbInmemoryMergesCount is the number of merges in indexdb.
+	IndexdbInmemoryMergesCount uint64
+
+	// IndexdbFileItemsMerged is the number of items merged in indexdb.
+	IndexdbFileItemsMerged uint64
+
+	// IndexdbInmemoryItemsMerged is the number of items merged in indexdb.
+	IndexdbInmemoryItemsMerged uint64
 }
 
 type indexdb struct {
@@ -74,6 +95,7 @@ type indexdb struct {
 
 func mustCreateIndexdb(path string) {
 	fs.MustMkdirFailIfExist(path)
+	fs.MustSyncPathAndParentDir(path)
 }
 
 func mustOpenIndexdb(path, partitionName string, s *Storage) *indexdb {
@@ -99,6 +121,10 @@ func (idb *indexdb) debugFlush() {
 	idb.tb.DebugFlush()
 }
 
+func (idb *indexdb) mustCreateSnapshotAt(dstDir string) {
+	idb.tb.MustCreateSnapshotAt(dstDir)
+}
+
 func (idb *indexdb) updateStats(d *IndexdbStats) {
 	d.StreamsCreatedTotal += idb.streamsCreatedTotal.Load()
 
@@ -107,8 +133,37 @@ func (idb *indexdb) updateStats(d *IndexdbStats) {
 
 	d.IndexdbSizeBytes += tm.InmemorySizeBytes + tm.FileSizeBytes
 	d.IndexdbItemsCount += tm.InmemoryItemsCount + tm.FileItemsCount
+	d.IndexdbPendingItems += tm.PendingItems
 	d.IndexdbPartsCount += tm.InmemoryPartsCount + tm.FilePartsCount
 	d.IndexdbBlocksCount += tm.InmemoryBlocksCount + tm.FileBlocksCount
+	d.IndexdbActiveFileMerges = tm.ActiveFileMerges
+	d.IndexdbActiveInmemoryMerges = tm.ActiveInmemoryMerges
+	d.IndexdbFileMergesCount += tm.FileMergesCount
+	d.IndexdbInmemoryMergesCount += tm.InmemoryMergesCount
+	d.IndexdbFileItemsMerged += tm.FileItemsMerged
+	d.IndexdbInmemoryItemsMerged += tm.InmemoryItemsMerged
+}
+
+func (idb *indexdb) appendStreamString(dst []byte, sid *streamID) []byte {
+	bb := bbPool.Get()
+	defer bbPool.Put(bb)
+
+	bb.B = idb.appendStreamTagsByStreamID(bb.B, sid)
+	if len(bb.B) == 0 {
+		// Couldn't find stream tags by sid. This may be the case when the corresponding log stream
+		// was recently registered and its tags aren't visible to search yet.
+		// The stream tags must become visible in a few seconds.
+		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/6042
+		return dst
+	}
+
+	st := GetStreamTags()
+	streamTagsCanonical := bytesutil.ToUnsafeString(bb.B)
+	mustUnmarshalStreamTagsInplace(st, streamTagsCanonical)
+	dst = st.marshalString(dst)
+	PutStreamTags(st)
+
+	return dst
 }
 
 func (idb *indexdb) appendStreamTagsByStreamID(dst []byte, sid *streamID) []byte {
@@ -313,8 +368,8 @@ func (is *indexSearch) getStreamIDsForNonEmptyTagValue(tenantID TenantID, tagNam
 	ts := &is.ts
 	kb := &is.kb
 	kb.B = marshalCommonPrefix(kb.B[:0], nsPrefixTagToStreamIDs, tenantID)
-	kb.B = marshalTagValue(kb.B, bytesutil.ToUnsafeBytes(tagName))
-	kb.B = marshalTagValue(kb.B, bytesutil.ToUnsafeBytes(tagValue))
+	kb.B = marshalTagValue(kb.B, tagName)
+	kb.B = marshalTagValue(kb.B, tagValue)
 	prefix := kb.B
 	ts.Seek(prefix)
 	for ts.NextItem() {
@@ -377,7 +432,7 @@ func (is *indexSearch) getStreamIDsForTagName(tenantID TenantID, tagName string)
 	ts := &is.ts
 	kb := &is.kb
 	kb.B = marshalCommonPrefix(kb.B[:0], nsPrefixTagToStreamIDs, tenantID)
-	kb.B = marshalTagValue(kb.B, bytesutil.ToUnsafeBytes(tagName))
+	kb.B = marshalTagValue(kb.B, tagName)
 	prefix := kb.B
 	ts.Seek(prefix)
 	for ts.NextItem() {
@@ -409,7 +464,7 @@ func (is *indexSearch) getStreamIDsForTagRegexp(tenantID TenantID, tagName strin
 	ts := &is.ts
 	kb := &is.kb
 	kb.B = marshalCommonPrefix(kb.B[:0], nsPrefixTagToStreamIDs, tenantID)
-	kb.B = marshalTagValue(kb.B, bytesutil.ToUnsafeBytes(tagName))
+	kb.B = marshalTagValue(kb.B, tagName)
 	prefix := kb.B
 	ts.Seek(prefix)
 	for ts.NextItem() {
@@ -437,9 +492,50 @@ func (is *indexSearch) getStreamIDsForTagRegexp(tenantID TenantID, tagName strin
 	return ids
 }
 
+func (is *indexSearch) getTenantIDs() []TenantID {
+	var tenantIDs []TenantID // return as result
+	var tenantID TenantID    // variable for unmarshal
+
+	ts := &is.ts
+	kb := &is.kb
+
+	kb.B = marshalCommonPrefix(kb.B[:0], nsPrefixStreamID, tenantID)
+	ts.Seek(kb.B)
+
+	for ts.NextItem() {
+		_, prefix, err := unmarshalCommonPrefix(&tenantID, ts.Item)
+		if err != nil {
+			logger.Panicf("FATAL: cannot unmarshal tenantID: %s", err)
+		}
+		if prefix != nsPrefixStreamID {
+			// Reached the end of entries with the needed prefix.
+			break
+		}
+		tenantIDs = append(tenantIDs, tenantID)
+		// Seek for the next (accountID, projectID)
+		tenantID.ProjectID++
+		if tenantID.ProjectID == 0 {
+			tenantID.AccountID++
+			if tenantID.AccountID == 0 {
+				// Reached the end (accountID, projectID) space
+				break
+			}
+		}
+
+		kb.B = marshalCommonPrefix(kb.B[:0], nsPrefixStreamID, tenantID)
+		ts.Seek(kb.B)
+	}
+
+	if err := ts.Error(); err != nil {
+		logger.Panicf("FATAL: error when searching for tenant ids: %s", err)
+	}
+
+	return tenantIDs
+}
+
 func (idb *indexdb) mustRegisterStream(streamID *streamID, streamTagsCanonical string) {
 	st := GetStreamTags()
-	mustUnmarshalStreamTags(st, streamTagsCanonical)
+	mustUnmarshalStreamTagsInplace(st, streamTagsCanonical)
 	tenantID := streamID.tenantID
 
 	bi := getBatchItems()
@@ -514,7 +610,7 @@ func (idb *indexdb) loadStreamIDsFromCache(tenantIDs []TenantID, sf *StreamFilte
 	}
 	src := data[nSize:]
 	streamIDs := make([]streamID, n)
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		tail, err := streamIDs[i].unmarshal(src)
 		if err != nil {
 			logger.Panicf("BUG: unexpected error when unmarshaling streamID #%d: %s", i, err)
@@ -531,7 +627,7 @@ func (idb *indexdb) storeStreamIDsToCache(tenantIDs []TenantID, sf *StreamFilter
 	// marshal streamIDs
 	var b []byte
 	b = encoding.MarshalVarUint64(b, uint64(len(streamIDs)))
-	for i := 0; i < len(streamIDs); i++ {
+	for i := range streamIDs {
 		b = streamIDs[i].marshal(b)
 	}
 
@@ -540,6 +636,13 @@ func (idb *indexdb) storeStreamIDsToCache(tenantIDs []TenantID, sf *StreamFilter
 	bb.B = idb.marshalStreamFilterCacheKey(bb.B[:0], tenantIDs, sf)
 	idb.s.filterStreamCache.Set(bb.B, &b)
 	bbPool.Put(bb)
+}
+
+func (idb *indexdb) searchTenants() []TenantID {
+	is := idb.getIndexSearch()
+	defer idb.putIndexSearch(is)
+
+	return is.getTenantIDs()
 }
 
 type batchItems struct {
@@ -771,6 +874,9 @@ type tagToStreamIDsRowParser struct {
 	// Tag contains parsed tag after Init call
 	Tag streamTag
 
+	// tagBuf is a buffer used during Tag parsing.
+	tagBuf []byte
+
 	// tail contains the remaining unparsed streamIDs
 	tail []byte
 }
@@ -780,6 +886,7 @@ func (sp *tagToStreamIDsRowParser) Reset() {
 	sp.StreamIDs = sp.StreamIDs[:0]
 	sp.streamIDsParsed = false
 	sp.Tag.reset()
+	sp.tagBuf = sp.tagBuf[:0]
 	sp.tail = nil
 }
 
@@ -796,7 +903,7 @@ func (sp *tagToStreamIDsRowParser) Init(b []byte) error {
 	if nsPrefix != nsPrefixTagToStreamIDs {
 		return fmt.Errorf("invalid prefix for tenantID:name:value -> streamIDs row %q; got %d; want %d", b, nsPrefix, nsPrefixTagToStreamIDs)
 	}
-	tail, err = sp.Tag.indexdbUnmarshal(tail)
+	tail, sp.tagBuf, err = sp.Tag.indexdbUnmarshal(tail, sp.tagBuf[:0])
 	if err != nil {
 		return fmt.Errorf("cannot unmarshal tag from tenantID:name:value -> streamIDs row %q: %w", b, err)
 	}
@@ -834,7 +941,7 @@ func (sp *tagToStreamIDsRowParser) InitOnlyTail(tail []byte) error {
 //
 // Prefix contains (tenantID:name:value)
 func (sp *tagToStreamIDsRowParser) EqualPrefix(x *tagToStreamIDsRowParser) bool {
-	if !sp.TenantID.equal(&x.TenantID) {
+	if !sp.TenantID.Equal(&x.TenantID) {
 		return false
 	}
 	if !sp.Tag.equal(&x.Tag) {
@@ -858,7 +965,7 @@ func (sp *tagToStreamIDsRowParser) ParseStreamIDs() {
 	sp.StreamIDs = slicesutil.SetLength(sp.StreamIDs, n)
 	streamIDs := sp.StreamIDs
 	_ = streamIDs[n-1]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var err error
 		tail, err = streamIDs[i].unmarshal(tail)
 		if err != nil {

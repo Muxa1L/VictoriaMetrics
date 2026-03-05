@@ -19,24 +19,24 @@ Stream aggregation can be configured via the following command-line flags:
   per each `-remoteWrite.url`, so the aggregation happens independently per each remote storage destination.
   This allows writing different aggregates to different remote storage systems.
 
-These flags must point to a file containing [stream aggregation config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#aggregation-config).
+These flags must point to a file containing [stream aggregation config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#stream-aggregation-config).
 The file may contain `%{ENV_VAR}` placeholders which are substituted by the corresponding `ENV_VAR` environment variable values.
 
 By default, the following data is written to the storage when stream aggregation is enabled:
 
 - the aggregated samples;
-- the raw input samples, which didn't match any `match` option in the provided [config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#aggregation-config).
+- the raw input samples, which didn't match any `match` option in the provided [config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#stream-aggregation-config).
 
 This behaviour can be changed via the following command-line flags:
 
 - `-streamAggr.keepInput` at [single-node VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/)
   and [vmagent](https://docs.victoriametrics.com/victoriametrics/vmagent/). At [vmagent](https://docs.victoriametrics.com/victoriametrics/vmagent/)
   `-remoteWrite.streamAggr.keepInput` flag can be specified individually per each `-remoteWrite.url`.
-  If one of these flags is set, then all the input samples are written to the storage alongside the aggregated samples.
+  If either of these flags is set, input samples that match any rule in the corresponding streamAggr configuration are preserved and written to storage.
 - `-streamAggr.dropInput` at [single-node VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/)
   and [vmagent](https://docs.victoriametrics.com/victoriametrics/vmagent/). At [vmagent](https://docs.victoriametrics.com/victoriametrics/vmagent/)
   `-remoteWrite.streamAggr.dropInput` flag can be specified individually per each `-remoteWrite.url`.
-  If one of these flags are set, then all the input samples are dropped, while only the aggregated samples are written to the storage.
+  If either of these flags is set, input samples that do not match any rule in the corresponding streamAggr configuration are dropped.
 
 ## Stream aggregation config
 
@@ -95,6 +95,17 @@ specified individually per each `-remoteWrite.url`:
   # See https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#staleness for more details.
   #
   # staleness_interval: 2m
+
+  # ignore_first_sample_interval specifies the interval after which the agent begins sending samples.
+  # By default, it is set to the staleness interval, and it helps reduce the initial sample load after an agent restart.
+  # This parameter is relevant only for the following outputs:
+  # - total
+  # - total_prometheus
+  # - increase
+  # - increase_prometheus
+  # - histogram_bucket
+  #
+  # ignore_first_sample_interval: 2m
   
   # no_align_flush_to_interval disables aligning of flush times for the aggregated data to multiples of interval.
   # By default, flush times for the aggregated data is aligned to multiples of interval.
@@ -187,13 +198,13 @@ support the following approaches for hot reloading stream aggregation configs fr
 
 ## Aggregation outputs
 
-The aggregations are calculated during the `interval` specified in the [config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#aggregation-config)
-and then sent to the storage once per `interval`. The aggregated samples are named according to [output metric naming](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#output-metric-names).
+The aggregations are calculated during the `interval` specified in the [config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#stream-aggregation-config)
+and then sent to the storage once per `interval`. The aggregated samples are named according to [output metric naming](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#output-metric-names).
 
-If `by` and `without` lists are specified in the [config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#aggregation-config),
-then the [aggregation by labels](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#aggregating-by-labels) is performed additionally to aggregation by `interval`.
+If `by` and `without` lists are specified in the [config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#stream-aggregation-config),
+then the [aggregation by labels](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#aggregating-by-labels) is performed additionally to aggregation by `interval`.
 
-Below are aggregation functions that can be put in the `outputs` list at [stream aggregation config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#aggregation-config):
+Below are aggregation functions that can be put in the `outputs` list at [stream aggregation config](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/configuration/#stream-aggregation-config):
 
 * [avg](#avg)
 * [count_samples](#count_samples)
@@ -272,7 +283,7 @@ See also:
 `histogram_bucket` returns [VictoriaMetrics histogram buckets](https://valyala.medium.com/improving-histogram-usability-for-prometheus-and-grafana-bc7e5df0e350)
 for the input [sample values](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#raw-samples) over the given `interval`.
 `histogram_bucket` makes sense only for aggregating [gauges](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#gauge).
-See how to aggregate regular histograms [here](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#aggregating-histograms).
+See how to aggregate regular histograms [here](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#aggregating-histograms).
 
 The results of `histogram_bucket` is equal to the following [MetricsQL](https://docs.victoriametrics.com/victoriametrics/metricsql/) query:
 
@@ -281,7 +292,7 @@ sum(histogram_over_time(some_histogram_bucket[interval])) by (vmrange)
 ```
 
 Aggregating irregular and sporadic metrics (received from [Lambdas](https://aws.amazon.com/lambda/)
-or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#staleness) option.
+or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#staleness) option.
 
 See also:
 - [quantiles](#quantiles)
@@ -309,7 +320,7 @@ For example, see below time series produced by config with aggregation interval 
 ![increase aggregation](configuration-increase.webp)
 
 Aggregating irregular and sporadic metrics (received from [Lambdas](https://aws.amazon.com/lambda/)
-or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#staleness) option.
+or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#staleness) option.
 
 See also:
 
@@ -333,7 +344,7 @@ sum(increase_prometheus(some_counter[interval]))
 If you need taking into account the first sample per time series, then take a look at [increase](#increase).
 
 Aggregating irregular and sporadic metrics (received from [Lambdas](https://aws.amazon.com/lambda/)
-or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#staleness) option.
+or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#staleness) option.
 
 See also:
 
@@ -529,7 +540,7 @@ An example of changing a set of series can be restarting a pod in the Kubernetes
 This changes pod name label, but the `total` accounts for such a scenario and doesn't reset the state of aggregated metric.
 
 Aggregating irregular and sporadic metrics (received from [Lambdas](https://aws.amazon.com/lambda/)
-or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#staleness) option.
+or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#staleness) option.
 
 See also:
 
@@ -558,7 +569,7 @@ it continues to increase monotonically with respect to the previous value.
 The counters are most often reset when the application is restarted.
 
 Aggregating irregular and sporadic metrics (received from [Lambdas](https://aws.amazon.com/lambda/)
-or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation#staleness) option.
+or [Cloud Functions](https://cloud.google.com/functions)) can be controlled via [staleness_interval](https://docs.victoriametrics.com/victoriametrics/stream-aggregation/#staleness) option.
 
 See also:
 

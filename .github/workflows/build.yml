@@ -47,23 +47,26 @@ jobs:
             arch: ppc64le
           - os: linux
             arch: 386
+          - os: linux
+            arch: s390x
           - os: freebsd
             arch: amd64
           - os: openbsd
             arch: amd64
     steps:
       - name: Code checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Go
         id: go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           cache-dependency-path: |
             go.sum
             Makefile
             app/**/Makefile
-          go-version: stable
+          go-version-file: 'go.mod'
+      - run: go version
 
       - name: Build vmcluster for ${{ matrix.os }}-${{ matrix.arch }}
         run: make vmcluster-${{ matrix.os }}-${{ matrix.arch }}

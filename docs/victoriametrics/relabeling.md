@@ -11,6 +11,7 @@ aliases:
   - /relabeling.html
   - /relabeling/index.html
   - /relabeling/
+  - /victoria-metrics/relabeling/
 ---
 
 The relabeling cookbook provides practical examples and patterns for
@@ -99,10 +100,10 @@ The main goal of this stage is to apply relabeling rules to all incoming
 metrics, no matter where they come from (push-based or pull-based sources). It
 includes two phases:
 
-- `-remoteWrite.relabelConfig`: This is applied to all metrics before they are
-  sent to any remote storage destination.
-- `-remoteWrite.urlRelabelConfig`: This is applied to all metrics before they
-  are sent to a specific remote storage destination.
+- `-remoteWrite.relabelConfig`: This is applied to all metrics before they are sent to any remote storage destination.
+  Config content is available at `http://vmagent-host:8429/remotewrite-relabel-config` endpoint {{% available_from "v1.129.0" %}}. 
+- `-remoteWrite.urlRelabelConfig`: This is applied to all metrics before they are sent to a specific remote storage destination.
+  Config content is available at `http://vmagent-host:8429/remotewrite-url-relabel-config` endpoint {{% available_from "v1.129.0" %}}.
 
 This functionality is essential for routing and filtering data in different ways
 for multiple backends. For example:
@@ -351,8 +352,8 @@ see two types of targets:
   service discovery, before any relabeling rules are applied. This includes
   targets that may later be dropped.
 
-_This option is not available when the component is started with the
-`-promscrape.dropOriginalLabels` flag._
+_This option is only available when the component is started with the
+`-promscrape.dropOriginalLabels=false` flag._
 
 {{% collapse name="How to use `/targets` page?" %}}
 
@@ -373,8 +374,8 @@ to all metrics scraped from that target.
 You can click the label column of the target to see the original labels
 **before** any relabeling was applied.
 
-_This option is not available when the component is started with the
-`-promscrape.dropOriginalLabels` flag._
+_This option is only available when the component is started with the
+`-promscrape.dropOriginalLabels=false` flag._
 
 **3. Why does a target have a certain set of labels?**
 
@@ -382,8 +383,8 @@ Click the `target` link in the `debug relabeling` column. This opens a
 step-by-step view of how the relabeling rules were applied to the original
 labels.
 
-_This option is not available when the component is started with the
-`-promscrape.dropOriginalLabels` flag._
+_This option is only available when the component is started with the
+`-promscrape.dropOriginalLabels=false` flag._
 
 **4. How are metric relabeling rules applied to scraped metrics?**
 
@@ -407,8 +408,8 @@ Each column on the page shows important details:
 This page shows all
 [discovered targets](https://docs.victoriametrics.com/victoriametrics/sd_configs/).
 
-_This option is not available when the component is started with the
-`-promscrape.dropOriginalLabels` flag._
+_This option is only available when the component is started with the
+`-promscrape.dropOriginalLabels=false` flag._
 
 It helps answer the following questions:
 
@@ -1099,7 +1100,7 @@ section instead of `relabel_configs` section. They serve different purposes:
 - Target relabeling can be debugged by clicking the `debug` link for a target on
   the `http://vmagent:8429/target` or `http://vmagent:8429/service-discovery`
   pages. See
-  [Relabel Debug - vmagent](https://docs.victoriametrics.com/victoriametrics/relabeling#relabel-debugging).
+  [Relabel Debug - vmagent](https://docs.victoriametrics.com/victoriametrics/relabeling/#relabel-debugging).
 - Special labels with the `__` prefix are automatically added when discovering
   targets and removed after relabeling:
   - Meta-labels starting with the `__meta_` prefix. The specific sets of labels
@@ -1124,7 +1125,7 @@ section instead of `relabel_configs` section. They serve different purposes:
 
 - Metric relabeling can be debugged on the
   `http://vmagent:8429/metric-relabel-debug` page. See
-  [these docs](https://docs.victoriametrics.com/victoriametrics/relabeling#relabel-debugging).
+  [these docs](https://docs.victoriametrics.com/victoriametrics/relabeling/#relabel-debugging).
 - All labels that start with the `__` prefix are automatically removed from
   metrics after relabeling. It is common practice to store temporary labels with
   names starting with `__` during metrics relabeling.

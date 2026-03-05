@@ -46,15 +46,14 @@ func insertRows(at *auth.Token, sketches []*datadogsketches.Sketch, extraLabels 
 		ms := sketch.ToSummary()
 		for _, m := range ms {
 			ctx.Labels = ctx.Labels[:0]
+			// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/10557
+			ctx.AddLabel("host", sketch.Host) // newly added
 			ctx.AddLabel("", m.Name)
 			for _, label := range m.Labels {
 				ctx.AddLabel(label.Name, label.Value)
 			}
 			for _, tag := range sketch.Tags {
 				name, value := datadogutil.SplitTag(tag)
-				if name == "host" {
-					name = "exported_host"
-				}
 				ctx.AddLabel(name, value)
 			}
 			for j := range extraLabels {
@@ -65,10 +64,10 @@ func insertRows(at *auth.Token, sketches []*datadogsketches.Sketch, extraLabels 
 				continue
 			}
 			atLocal := ctx.GetLocalAuthToken(at)
-			ctx.MetricNameBuf = storage.MarshalMetricNameRaw(ctx.MetricNameBuf[:0], atLocal.AccountID, atLocal.ProjectID, ctx.Labels)
+			ctx.Buf = storage.MarshalMetricNameRaw(ctx.Buf[:0], atLocal.AccountID, atLocal.ProjectID, ctx.Labels)
 			storageNodeIdx := ctx.GetStorageNodeIdx(atLocal, ctx.Labels)
 			for _, p := range m.Points {
-				if err := ctx.WriteDataPointExt(storageNodeIdx, ctx.MetricNameBuf, p.Timestamp, p.Value); err != nil {
+				if err := ctx.WriteDataPointExt(storageNodeIdx, ctx.Buf, p.Timestamp, p.Value); err != nil {
 					return err
 				}
 			}

@@ -4,9 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,13 +29,13 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vminsert/promremotewrite"
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vminsert/relabel"
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vminsert/vmimport"
+	"github.com/VictoriaMetrics/VictoriaMetrics/app/vminsert/zabbixconnector"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/auth"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/buildinfo"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/envflag"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/flagutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/httpserver"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/influxutil"
-	clusternativeserver "github.com/VictoriaMetrics/VictoriaMetrics/lib/ingestserver/clusternative"
 	graphiteserver "github.com/VictoriaMetrics/VictoriaMetrics/lib/ingestserver/graphite"
 	influxserver "github.com/VictoriaMetrics/VictoriaMetrics/lib/ingestserver/influx"
 	opentsdbserver "github.com/VictoriaMetrics/VictoriaMetrics/lib/ingestserver/opentsdb"
@@ -46,6 +46,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/protoparser/protoparserutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/pushmetrics"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/timeserieslimits"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/vminsertapi"
 )
 
 var (
@@ -83,7 +84,7 @@ var (
 )
 
 var (
-	clusternativeServer *clusternativeserver.Server
+	clusternativeServer *vminsertapi.VMInsertServer
 	graphiteServer      *graphiteserver.Server
 	influxServer        *influxserver.Server
 	opentsdbServer      *opentsdbserver.Server
@@ -123,9 +124,11 @@ func main() {
 	timeserieslimits.Init(*maxLabelsPerTimeseries, *maxLabelNameLen, *maxLabelValueLen)
 	protoparserutil.StartUnmarshalWorkers()
 	if len(*clusternativeListenAddr) > 0 {
-		clusternativeServer = clusternativeserver.MustStart(*clusternativeListenAddr, func(c net.Conn) error {
-			return clusternative.InsertHandler(c)
-		})
+		s, err := clusternative.NewVMinsertServer(*clusternativeListenAddr, nil)
+		if err != nil {
+			logger.Fatalf("cannot initialize vminsertapi server: %s", err)
+		}
+		clusternativeServer = s
 	}
 	if len(*graphiteListenAddr) > 0 {
 		graphiteServer = graphiteserver.MustStart(*graphiteListenAddr, *graphiteUseProxyProtocol, func(r io.Reader) error {
@@ -150,7 +153,9 @@ func main() {
 	if len(listenAddrs) == 0 {
 		listenAddrs = []string{":8480"}
 	}
-	go httpserver.Serve(listenAddrs, requestHandler, httpserver.ServeOptions{UseProxyProtocol: useProxyProtocol})
+	go httpserver.Serve(listenAddrs, requestHandler, httpserver.ServeOptions{
+		UseProxyProtocol: useProxyProtocol,
+	})
 
 	pushmetrics.Init()
 	sig := procutil.WaitForSigterm()
@@ -309,6 +314,17 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 		}
 		firehose.WriteSuccessResponse(w, r)
 		return true
+	case "zabbixconnector/api/v1/history":
+		zabbixconnectorHistoryRequests.Inc()
+		if err := zabbixconnector.InsertHandlerForHTTP(at, r); err != nil {
+			zabbixconnectorHistoryErrors.Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":%q}`, err.Error())
+			return true
+		}
+		w.WriteHeader(http.StatusOK)
+		return true
 	case "newrelic":
 		newrelicCheckRequest.Inc()
 		w.Header().Set("Content-Type", "application/json")
@@ -442,8 +458,10 @@ var (
 	datadogv2WriteRequests = metrics.NewCounter(`vm_http_requests_total{path="/insert/{}/datadog/api/v2/series", protocol="datadog"}`)
 	datadogv2WriteErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/insert/{}/datadog/api/v2/series", protocol="datadog"}`)
 
-	datadogsketchesWriteRequests = metrics.NewCounter(`vm_http_requests_total{path="/insert/{}/datadog/api/beta/sketches", protocol="datadog"}`)
-	datadogsketchesWriteErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/insert/{}/datadog/api/beta/sketches", protocol="datadog"}`)
+	datadogsketchesWriteRequests   = metrics.NewCounter(`vm_http_requests_total{path="/insert/{}/datadog/api/beta/sketches", protocol="datadog"}`)
+	datadogsketchesWriteErrors     = metrics.NewCounter(`vm_http_request_errors_total{path="/insert/{}/datadog/api/beta/sketches", protocol="datadog"}`)
+	zabbixconnectorHistoryRequests = metrics.NewCounter(`vm_http_requests_total{path="/insert/{}/zabbixconnector/api/v1/history", protocol="zabbixconnector"}`)
+	zabbixconnectorHistoryErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/insert/{}/zabbixconnector/api/v1/history", protocol="zabbixconnector"}`)
 
 	datadogValidateRequests = metrics.NewCounter(`vm_http_requests_total{path="/insert/{}/datadog/api/v1/validate", protocol="datadog"}`)
 	datadogCheckRunRequests = metrics.NewCounter(`vm_http_requests_total{path="/insert/{}/datadog/api/v1/check_run", protocol="datadog"}`)
@@ -472,10 +490,5 @@ func checkDuplicates(arr []string) string {
 }
 
 func hasEmptyValues(arr []string) bool {
-	for _, s := range arr {
-		if s == "" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(arr, "")
 }

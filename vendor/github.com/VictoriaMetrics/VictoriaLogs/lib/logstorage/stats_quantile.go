@@ -78,7 +78,7 @@ func (sqp *statsQuantileProcessor) updateStateForColumn(br *blockResult, c *bloc
 
 	if c.isConst {
 		v := c.valuesEncoded[0]
-		for i := 0; i < br.rowsLen; i++ {
+		for range br.rowsLen {
 			stateSizeIncrease += h.update(v)
 		}
 		return stateSizeIncrease
@@ -196,7 +196,7 @@ func (sqp *statsQuantileProcessor) finalizeStats(sf statsFunc, dst []byte, _ <-c
 	return append(dst, q...)
 }
 
-func parseStatsQuantile(lex *lexer) (*statsQuantile, error) {
+func parseStatsQuantile(lex *lexer) (statsFunc, error) {
 	fieldFilters, err := parseStatsFuncFieldFilters(lex, "quantile")
 	if err != nil {
 		return nil, err

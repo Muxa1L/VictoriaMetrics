@@ -113,7 +113,7 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 		input:         make(chan prompb.TimeSeries, cfg.MaxQueueSize),
 	}
 
-	for i := 0; i < cc; i++ {
+	for range cc {
 		c.run(ctx)
 	}
 	return c, nil
@@ -173,9 +173,8 @@ func (c *Client) run(ctx context.Context) {
 
 		cancel()
 	}
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+
+	c.wg.Go(func() {
 		defer ticker.Stop()
 		for {
 			select {
@@ -187,6 +186,11 @@ func (c *Client) run(ctx context.Context) {
 				return
 			case <-ticker.C:
 				c.flush(ctx, wr)
+				// drain the potential stale tick to avoid small or empty flushes after a slow flush.
+				select {
+				case <-ticker.C:
+				default:
+				}
 			case ts, ok := <-c.input:
 				if !ok {
 					continue
@@ -197,7 +201,7 @@ func (c *Client) run(ctx context.Context) {
 				}
 			}
 		}
-	}()
+	})
 }
 
 var (
@@ -239,8 +243,10 @@ func (c *Client) flush(ctx context.Context, wr *prompb.WriteRequest) {
 	defer func() {
 		sendDuration.Add(time.Since(timeStart).Seconds())
 	}()
+
+	attempts := 0
 L:
-	for attempts := 0; ; attempts++ {
+	for {
 		err := c.send(ctx, b)
 		if err != nil && (errors.Is(err, io.EOF) || netutil.IsTrivialNetworkError(err)) {
 			// Something in the middle between client and destination might be closing
@@ -282,6 +288,7 @@ L:
 		time.Sleep(retryInterval)
 		retryInterval *= 2
 
+		attempts++
 	}
 
 	rwErrors.Inc()

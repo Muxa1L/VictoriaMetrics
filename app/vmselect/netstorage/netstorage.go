@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +36,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/netutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/querytracer"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage/metricsmetadata"
 )
 
 var (
@@ -334,14 +337,12 @@ func (rss *Results) runParallel(qt *querytracer.Tracer, f func(rs *Result, worke
 
 	// Start workers and wait until they finish the work.
 	var wg sync.WaitGroup
-	for i := range workChs {
-		wg.Add(1)
-		qtChild := qt.NewChild("worker #%d", i)
-		go func(workerID uint) {
-			timeseriesWorker(qtChild, workChs, workerID)
+	for workerID := range workChs {
+		qtChild := qt.NewChild("worker #%d", workerID)
+		wg.Go(func() {
+			timeseriesWorker(qtChild, workChs, uint(workerID))
 			qtChild.Done()
-			wg.Done()
-		}(uint(i))
+		})
 	}
 	wg.Wait()
 
@@ -532,10 +533,7 @@ func (pts *packedTimeseries) unpackTo(dst []*sortBlock, tbfs []*tmpBlocksFile, t
 	}
 
 	// Prepare worker channels.
-	workers := min(len(upws), gomaxprocs)
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(min(len(upws), gomaxprocs), 1)
 	itemsPerWorker := (len(upws) + workers - 1) / workers
 	workChs := make([]chan *unpackWork, workers)
 	for i := range workChs {
@@ -554,12 +552,10 @@ func (pts *packedTimeseries) unpackTo(dst []*sortBlock, tbfs []*tmpBlocksFile, t
 
 	// Start workers and wait until they finish the work.
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(workerID uint) {
-			unpackWorker(workChs, workerID)
-			wg.Done()
-		}(uint(i))
+	for workerID := range workers {
+		wg.Go(func() {
+			unpackWorker(workChs, uint(workerID))
+		})
 	}
 	wg.Wait()
 
@@ -622,6 +618,7 @@ func mergeSortBlocks(dst *Result, sbh *sortBlocksHeap, dedupInterval int64) {
 		return
 	}
 	heap.Init(sbh)
+	var dedupSamples int
 	for {
 		sbs := sbh.sbs
 		top := sbs[0]
@@ -637,6 +634,7 @@ func mergeSortBlocks(dst *Result, sbh *sortBlocksHeap, dedupInterval int64) {
 		if n := equalSamplesPrefix(top, sbNext); n > 0 && dedupInterval > 0 {
 			// Skip n replicated samples at top if deduplication is enabled.
 			top.NextIdx = topNextIdx + n
+			dedupSamples += n
 		} else {
 			// Copy samples from top to dst with timestamps not exceeding tsNext.
 			top.NextIdx = topNextIdx + binarySearchTimestamps(top.Timestamps[topNextIdx:], tsNext)
@@ -651,8 +649,8 @@ func mergeSortBlocks(dst *Result, sbh *sortBlocksHeap, dedupInterval int64) {
 		}
 	}
 	timestamps, values := storage.DeduplicateSamples(dst.Timestamps, dst.Values, dedupInterval)
-	dedups := len(dst.Timestamps) - len(timestamps)
-	dedupsDuringSelect.Add(dedups)
+	dedupSamples += len(dst.Timestamps) - len(timestamps)
+	dedupsDuringSelect.Add(dedupSamples)
 	dst.Timestamps = timestamps
 	dst.Values = values
 }
@@ -678,7 +676,7 @@ func equalTimestampsPrefix(a, b []int64) int {
 
 func equalValuesPrefix(a, b []float64) int {
 	for i, v := range a {
-		if i >= len(b) || v != b[i] {
+		if i >= len(b) || math.Float64bits(v) != math.Float64bits(b[i]) {
 			return i
 		}
 	}
@@ -986,12 +984,7 @@ func GraphiteTags(qt *querytracer.Tracer, accountID, projectID uint32, denyParti
 }
 
 func hasString(a []string, s string) bool {
-	for _, x := range a {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(a, s)
 }
 
 // LabelValues returns label values matching the given labelName and sq until the given deadline.
@@ -1002,30 +995,19 @@ func LabelValues(qt *querytracer.Tracer, denyPartialResponse bool, labelName str
 		return nil, false, fmt.Errorf("timeout exceeded before starting the query processing: %s", deadline.String())
 	}
 
+	err := populateSqTenantTokensIfNeeded(sq)
+	if err != nil {
+		return nil, false, err
+	}
+
 	if sq.IsMultiTenant && isTenancyLabel(labelName) {
-		tenants, err := Tenants(qt, sq.GetTimeRange(), deadline)
-		if err != nil {
-			return nil, false, err
-		}
-
-		var idx int
-		switch labelName {
-		case "vm_account_id":
-			idx = 0
-		case "vm_project_id":
-			idx = 1
-		default:
-			logger.Panicf("BUG: unexpected labeName=%q", labelName)
-		}
-
-		labelValues := make([]string, 0, len(tenants))
-		for _, t := range tenants {
-			s := strings.Split(t, ":")
-			if len(s) != 2 {
-				logger.Panicf("BUG: unexpected tenant received from storage: %q", t)
+		labelValues := make([]string, 0, len(sq.TenantTokens))
+		for _, t := range sq.TenantTokens {
+			v := t.AccountID
+			if labelName == "vm_project_id" {
+				v = t.ProjectID
 			}
-
-			labelValues = append(labelValues, s[idx])
+			labelValues = append(labelValues, fmt.Sprintf("%d", v))
 		}
 
 		labelValues = prepareLabelValues(qt, labelValues, maxLabelValues)
@@ -1036,10 +1018,6 @@ func LabelValues(qt *querytracer.Tracer, denyPartialResponse bool, labelName str
 	type nodeResult struct {
 		labelValues []string
 		err         error
-	}
-	err := populateSqTenantTokensIfNeeded(sq)
-	if err != nil {
-		return nil, false, err
 	}
 	sns := getStorageNodes()
 	snr := startStorageNodesRequest(qt, sns, denyPartialResponse, func(qt *querytracer.Tracer, _ uint, sn *storageNode) any {
@@ -1141,6 +1119,54 @@ func Tenants(qt *querytracer.Tracer, tr storage.TimeRange, deadline searchutil.D
 	sort.Strings(tenants)
 	qt.Printf("sort %d tenants", len(tenants))
 	return tenants, nil
+}
+
+// GetMetricsMetadata returns time series metric names metadata for the given args
+func GetMetricsMetadata(qt *querytracer.Tracer, tt *storage.TenantToken, denyPartialResponse bool, limit int, metricName string, deadline searchutil.Deadline) ([]*metricsmetadata.Row, bool, error) {
+	qt = qt.NewChild("get metrics metadata: limit=%d, metric_name=%q", limit, metricName)
+	defer qt.Done()
+	if deadline.Exceeded() {
+		return nil, false, fmt.Errorf("timeout exceeded before starting the query processing: %s", deadline.String())
+	}
+	type nodeResult struct {
+		metadata []*metricsmetadata.Row
+		err      error
+	}
+	sns := getStorageNodes()
+	snr := startStorageNodesRequest(qt, sns, denyPartialResponse, func(qt *querytracer.Tracer, _ uint, sn *storageNode) any {
+		sn.metricsMetadataRequests.Inc()
+		metadata, err := sn.getMetricsMetadata(qt, tt, limit, metricName, deadline)
+		if err != nil {
+			sn.metricsMetadataErrors.Inc()
+			err = fmt.Errorf("cannot get metrics metadata from vmstorage %s: %w", sn.connPool.Addr(), err)
+		}
+		return &nodeResult{
+			metadata: metadata,
+			err:      err,
+		}
+	})
+
+	var metadata []*metricsmetadata.Row
+	isPartial, err := snr.collectResults(partialMetadataResults, func(result any) error {
+		nr := result.(*nodeResult)
+		if nr.err != nil {
+			return nr.err
+		}
+		metadata = append(metadata, nr.metadata...)
+		return nil
+	})
+	if err != nil {
+		return nil, isPartial, fmt.Errorf("cannot fetch metrics metadata from vmstorage nodes: %w", err)
+	}
+
+	sort.Slice(metadata, func(i, j int) bool {
+		return string(metadata[i].MetricFamilyName) < string(metadata[j].MetricFamilyName)
+	})
+	if limit > 0 && len(metadata) >= limit {
+		metadata = metadata[:limit]
+	}
+
+	return metadata, isPartial, nil
 }
 
 // GraphiteTagValues returns tag values for the given tagName until the given deadline.
@@ -1853,16 +1879,38 @@ func ProcessSearchQuery(qt *querytracer.Tracer, denyPartialResponse bool, sq *st
 	return &rss, isPartial, nil
 }
 
-// ProcessBlocks calls processBlock per each block matching the given sq.
-func ProcessBlocks(qt *querytracer.Tracer, denyPartialResponse bool, sq *storage.SearchQuery,
-	processBlock func(mb *storage.MetricBlock, workerID uint) error, deadline searchutil.Deadline,
-) (bool, error) {
+// PrepareProcessRawBlocks prepares metric blocks processor.
+//
+// Returns workers count and processBlocks function
+func PrepareProcessRawBlocks(qt *querytracer.Tracer, denyPartialResponse bool, sq *storage.SearchQuery,
+	deadline searchutil.Deadline,
+) (int, func(processBlock func(mb []byte, workerID uint) error) (bool, error)) {
 	sns := getStorageNodes()
-	return processBlocks(qt, sns, denyPartialResponse, sq, processBlock, deadline)
+	return len(sns), func(processBlock func(mb []byte, workerID uint) error) (bool, error) {
+		return processBlocksInternal(qt, sns, denyPartialResponse, sq, processBlock, deadline)
+	}
 }
 
 func processBlocks(qt *querytracer.Tracer, sns []*storageNode, denyPartialResponse bool, sq *storage.SearchQuery,
 	processBlock func(mb *storage.MetricBlock, workerID uint) error, deadline searchutil.Deadline,
+) (bool, error) {
+	mbs := make([]storage.MetricBlock, len(sns))
+	f := func(rawBlock []byte, workerID uint) error {
+		mb := &mbs[workerID]
+		tail, err := mb.Unmarshal(rawBlock)
+		if err != nil {
+			return fmt.Errorf("cannot unmarshal MetricBlock from %d bytes: %w", len(rawBlock), err)
+		}
+		if len(tail) > 0 {
+			return fmt.Errorf("non-empty tail after unmarshaling MetricBlock: (len=%d) %q", len(tail), tail)
+		}
+		return processBlock(mb, workerID)
+	}
+	return processBlocksInternal(qt, sns, denyPartialResponse, sq, f, deadline)
+}
+
+func processBlocksInternal(qt *querytracer.Tracer, sns []*storageNode, denyPartialResponse bool, sq *storage.SearchQuery,
+	processBlock func(rawBlock []byte, workerID uint) error, deadline searchutil.Deadline,
 ) (bool, error) {
 	// Make sure that processBlock is no longer called after the exit from processBlocks() function.
 	// Use per-worker WaitGroup instead of a shared WaitGroup in order to avoid inter-CPU contention,
@@ -1884,7 +1932,7 @@ func processBlocks(qt *querytracer.Tracer, sns []*storageNode, denyPartialRespon
 		_ [atomicutil.CacheLineSize - unsafe.Sizeof(wgStruct{})%atomicutil.CacheLineSize]byte
 	}
 	wgs := make([]wgWithPadding, len(sns))
-	f := func(mb *storage.MetricBlock, workerID uint) error {
+	f := func(rawBlock []byte, workerID uint) error {
 		muwg := &wgs[workerID]
 		muwg.mu.Lock()
 		if muwg.stop {
@@ -1893,7 +1941,7 @@ func processBlocks(qt *querytracer.Tracer, sns []*storageNode, denyPartialRespon
 		}
 		muwg.wg.Add(1)
 		muwg.mu.Unlock()
-		err := processBlock(mb, workerID)
+		err := processBlock(rawBlock, workerID)
 		muwg.wg.Done()
 		return err
 	}
@@ -2018,8 +2066,7 @@ func (snr *storageNodesRequest) finishQueryTracer(qt *querytracer.Tracer, msg st
 }
 
 func (snr *storageNodesRequest) collectAllResults(f func(result any) error) error {
-	sns := snr.sns
-	for i := 0; i < len(sns); i++ {
+	for range snr.sns {
 		result := <-snr.resultsCh
 		if err := f(result.data); err != nil {
 			snr.finishQueryTracer(result.qt, fmt.Sprintf("error: %s", err))
@@ -2050,10 +2097,11 @@ func (snr *storageNodesRequest) collectResults(partialResultsCounter *metrics.Co
 		if err := f(result.data); err != nil {
 			snr.finishQueryTracer(result.qt, fmt.Sprintf("error: %s", err))
 			var er *errRemote
-			if errors.As(err, &er) {
+			if errors.As(err, &er) && !strings.Contains(er.msg, "search.maxConcurrentRequests") {
 				// Immediately return the error reported by vmstorage to the caller,
 				// since such errors usually mean misconfiguration at vmstorage.
 				// The misconfiguration must be known by the caller, so it is fixed ASAP.
+				// Hitting maxConcurrentRequests limit is not fatal if replicationFactor > 1.
 				snr.finishQueryTracers("cancel request because of error in other vmstorage nodes")
 				return false, err
 			}
@@ -2260,14 +2308,15 @@ type storageNode struct {
 	// The number of metric blocks read.
 	metricBlocksRead *metrics.Counter
 
-	// The number of read metric rows.
-	metricRowsRead *metrics.Counter
-
 	// The number of list tenants requests to storageNode.
 	tenantsRequests *metrics.Counter
 
 	// The number of list tenants errors to storageNode.
 	tenantsErrors *metrics.Counter
+
+	metricsMetadataRequests *metrics.Counter
+
+	metricsMetadataErrors *metrics.Counter
 }
 
 func (sn *storageNode) registerMetricNames(qt *querytracer.Tracer, mrs []storage.MetricRow, deadline searchutil.Deadline) error {
@@ -2410,7 +2459,7 @@ func (sn *storageNode) processSearchMetricNames(qt *querytracer.Tracer, requestD
 	return metricNames, nil
 }
 
-func (sn *storageNode) processSearchQuery(qt *querytracer.Tracer, requestData []byte, processBlock func(mb *storage.MetricBlock, workerID uint) error,
+func (sn *storageNode) processSearchQuery(qt *querytracer.Tracer, requestData []byte, processBlock func(rawBlock []byte, workerID uint) error,
 	workerID uint, deadline searchutil.Deadline,
 ) error {
 	f := func(bc *handshake.BufferedConn) error {
@@ -2784,7 +2833,7 @@ func (sn *storageNode) getTagValueSuffixesOnConn(bc *handshake.BufferedConn, acc
 		return nil, fmt.Errorf("cannot read the number of tag value suffixes: %w", err)
 	}
 	suffixes := make([]string, 0, suffixesCount)
-	for i := 0; i < int(suffixesCount); i++ {
+	for i := range int(suffixesCount) {
 		buf, err = readBytes(buf[:0], bc, maxLabelValueSize)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read tag value suffix #%d: %w", i+1, err)
@@ -2876,7 +2925,7 @@ func readTopHeapEntries(bc *handshake.BufferedConn) ([]storage.TopHeapEntry, err
 	}
 	var a []storage.TopHeapEntry
 	var buf []byte
-	for i := uint64(0); i < n; i++ {
+	for range n {
 		buf, err = readBytes(buf[:0], bc, maxLabelNameSize)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read label name: %w", err)
@@ -2950,7 +2999,7 @@ func (sn *storageNode) processSearchMetricNamesOnConn(bc *handshake.BufferedConn
 		return nil, fmt.Errorf("cannot read metricNamesCount: %w", err)
 	}
 	metricNames := make([]string, metricNamesCount)
-	for i := int64(0); i < int64(metricNamesCount); i++ {
+	for i := range int64(metricNamesCount) {
 		buf, err = readBytes(buf[:0], bc, maxMetricNameSize)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read metricName #%d: %w", i+1, err)
@@ -2963,7 +3012,7 @@ func (sn *storageNode) processSearchMetricNamesOnConn(bc *handshake.BufferedConn
 const maxMetricNameSize = 64 * 1024
 
 func (sn *storageNode) processSearchQueryOnConn(bc *handshake.BufferedConn, requestData []byte,
-	processBlock func(mb *storage.MetricBlock, workerID uint) error, workerID uint,
+	processBlock func(rawBlock []byte, workerID uint) error, workerID uint,
 ) error {
 	// Send the request to sn.
 	if err := writeBytes(bc, requestData); err != nil {
@@ -2984,7 +3033,6 @@ func (sn *storageNode) processSearchQueryOnConn(bc *handshake.BufferedConn, requ
 
 	// Read response. It may consist of multiple MetricBlocks.
 	blocksRead := 0
-	var mb storage.MetricBlock
 	for {
 		buf, err = readBytes(buf[:0], bc, maxMetricBlockSize)
 		if err != nil {
@@ -2994,18 +3042,10 @@ func (sn *storageNode) processSearchQueryOnConn(bc *handshake.BufferedConn, requ
 			// Reached the end of the response
 			return nil
 		}
-		tail, err := mb.Unmarshal(buf)
-		if err != nil {
-			return fmt.Errorf("cannot unmarshal MetricBlock #%d from %d bytes: %w", blocksRead, len(buf), err)
-		}
-		if len(tail) != 0 {
-			return fmt.Errorf("non-empty tail after unmarshaling MetricBlock #%d: (len=%d) %q", blocksRead, len(tail), tail)
-		}
 		blocksRead++
 		sn.metricBlocksRead.Inc()
-		sn.metricRowsRead.Add(mb.Block.RowsCount())
-		if err := processBlock(&mb, workerID); err != nil {
-			return fmt.Errorf("cannot process MetricBlock #%d: %w", blocksRead, err)
+		if err := processBlock(buf, workerID); err != nil {
+			return fmt.Errorf("cannot process Raw MetricBlock #%d: %w", blocksRead, err)
 		}
 	}
 }
@@ -3168,14 +3208,12 @@ func initStorageNodes(addrs []string) *storageNodesBucket {
 		groupName, addr = netutil.ParseGroupAddr(addr)
 		group := groupsMap[groupName]
 
-		wg.Add(1)
-		go func(addr string) {
-			defer wg.Done()
+		wg.Go(func() {
 			sn := newStorageNode(ms, group, addr)
 			snsLock.Lock()
 			sns = append(sns, sn)
 			snsLock.Unlock()
-		}(addr)
+		})
 	}
 	wg.Wait()
 	metrics.RegisterSet(ms)
@@ -3221,9 +3259,10 @@ func newStorageNode(ms *metrics.Set, group *storageNodesGroup, addr string) *sto
 		searchErrors:                ms.NewCounter(fmt.Sprintf(`vm_request_errors_total{action="search", type="rpcClient", name="vmselect", addr=%q}`, addr)),
 		tenantsRequests:             ms.NewCounter(fmt.Sprintf(`vm_requests_total{action="tenants", type="rpcClient", name="vmselect", addr=%q}`, addr)),
 		tenantsErrors:               ms.NewCounter(fmt.Sprintf(`vm_request_errors_total{action="tenants", type="rpcClient", name="vmselect", addr=%q}`, addr)),
+		metricsMetadataRequests:     ms.NewCounter(fmt.Sprintf(`vm_requests_total{action="metricsMetadata", type="rpcClient", name="vmselect", addr=%q}`, addr)),
+		metricsMetadataErrors:       ms.NewCounter(fmt.Sprintf(`vm_request_errors_total{action="metricsMetadata", type="rpcClient", name="vmselect", addr=%q}`, addr)),
 
 		metricBlocksRead: ms.NewCounter(fmt.Sprintf(`vm_metric_blocks_read_total{name="vmselect", addr=%q}`, addr)),
-		metricRowsRead:   ms.NewCounter(fmt.Sprintf(`vm_metric_rows_read_total{name="vmselect", addr=%q}`, addr)),
 	}
 	return sn
 }
@@ -3243,6 +3282,7 @@ var (
 	partialSeriesCountResults       = metrics.NewCounter(`vm_partial_results_total{action="seriesCount", name="vmselect"}`)
 	partialSearchMetricNamesResults = metrics.NewCounter(`vm_partial_results_total{action="searchMetricNames", name="vmselect"}`)
 	partialSearchResults            = metrics.NewCounter(`vm_partial_results_total{action="search", name="vmselect"}`)
+	partialMetadataResults          = metrics.NewCounter(`vm_partial_results_total{action="metadata", name="vmselect"}`)
 )
 
 func applyGraphiteRegexpFilter(filter string, ss []string) ([]string, error) {
@@ -3297,7 +3337,7 @@ func (pnc *perNodeCounter) GetTotal() uint64 {
 const maxFastAllocBlockSize = 32 * 1024
 
 // execSearchQueryRequest executes processSearchQuery for each searchQuery tenant.
-func execSearchQueryRequest(qt *querytracer.Tracer, sq *storage.SearchQuery, workerID uint, sn *storageNode, f func(mb *storage.MetricBlock, workerID uint) error, deadline searchutil.Deadline) error {
+func execSearchQueryRequest(qt *querytracer.Tracer, sq *storage.SearchQuery, workerID uint, sn *storageNode, f func(rawBlock []byte, workerID uint) error, deadline searchutil.Deadline) error {
 	var requestData []byte
 
 	for i := range sq.TenantTokens {
@@ -3520,4 +3560,86 @@ func (sn *storageNode) processResetMetricNamesUsageStats(qt *querytracer.Tracer,
 		return nil
 	}
 	return sn.execOnConnWithPossibleRetry(qt, "resetMetricNamesStats_v1", f, deadline)
+}
+
+func processSearchMetadataOnConn(bc *handshake.BufferedConn, tt *storage.TenantToken, limit int, metricName string) ([]*metricsmetadata.Row, error) {
+	hasTenantToken := tt != nil
+	if err := writeBool(bc, hasTenantToken); err != nil {
+		return nil, fmt.Errorf("cannot write hasTenantToken: %w", err)
+	}
+	// conditionally write tenant token
+	if hasTenantToken {
+		if err := writeUint32(bc, tt.AccountID); err != nil {
+			return nil, fmt.Errorf("cannot write AccountID: %w", err)
+		}
+		if err := writeUint32(bc, tt.ProjectID); err != nil {
+			return nil, fmt.Errorf("cannot write ProjectID: %w", err)
+		}
+	}
+	if err := writeLimit(bc, limit); err != nil {
+		return nil, fmt.Errorf("cannot write limit: %w", err)
+	}
+	if err := writeBytes(bc, []byte(metricName)); err != nil {
+		return nil, fmt.Errorf("cannot write metricName: %w", err)
+	}
+	if err := bc.Flush(); err != nil {
+		return nil, fmt.Errorf("cannot flush write: %w", err)
+	}
+
+	// read error message
+	buf, err := readBytes(nil, bc, maxErrorMessageSize)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read error message: %w", err)
+	}
+	if len(buf) > 0 {
+		return nil, newErrRemote(buf)
+	}
+
+	result, err := readMetadataRows(bc)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read metadata rows: %w", err)
+	}
+
+	return result, nil
+}
+
+func readMetadataRows(bc *handshake.BufferedConn) ([]*metricsmetadata.Row, error) {
+	n, err := readUint64(bc)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the number of metadata records: %w", err)
+	}
+	records := make([]*metricsmetadata.Row, 0, n)
+	var dataBuf []byte
+	for i := range n {
+		dataBuf, err = readBytes(dataBuf[:0], bc, maxLabelValueSize)
+		if err != nil {
+			return records, fmt.Errorf("cannot read record metricName: %w", err)
+		}
+		var record metricsmetadata.Row
+		dataBuf, err = record.Unmarshal(dataBuf)
+		if err != nil {
+			return records, fmt.Errorf("cannot unmarshal record metricName: %w", err)
+		}
+		if len(dataBuf) != 0 {
+			return records, fmt.Errorf("non-empty tail after unmarshaling Row #%d: (len=%d) %q", i, len(dataBuf), dataBuf)
+		}
+		records = append(records, &record)
+	}
+	return records, nil
+}
+
+func (sn *storageNode) getMetricsMetadata(qt *querytracer.Tracer, tt *storage.TenantToken, limit int, metricName string, deadline searchutil.Deadline) ([]*metricsmetadata.Row, error) {
+	var result []*metricsmetadata.Row
+	f := func(bc *handshake.BufferedConn) error {
+		bcResult, err := processSearchMetadataOnConn(bc, tt, limit, metricName)
+		if err != nil {
+			return err
+		}
+		result = append(result, bcResult...)
+		return nil
+	}
+	if err := sn.execOnConnWithPossibleRetry(qt, "searchMetadata_v1", f, deadline); err != nil {
+		return result, err
+	}
+	return result, nil
 }

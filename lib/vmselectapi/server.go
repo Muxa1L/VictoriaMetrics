@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/VictoriaMetrics/metrics"
+
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
@@ -19,8 +21,8 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/netutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/querytracer"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage/metricsmetadata"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/timerpool"
-	"github.com/VictoriaMetrics/metrics"
 )
 
 // Server processes vmselect requests.
@@ -66,9 +68,9 @@ type Server struct {
 	searchMetricNamesRequests   *metrics.Counter
 	searchRequests              *metrics.Counter
 	tenantsRequests             *metrics.Counter
+	searchMetadataRequests      *metrics.Counter
 
 	metricBlocksRead *metrics.Counter
-	metricRowsRead   *metrics.Counter
 }
 
 // Limits contains various limits for Server.
@@ -136,17 +138,13 @@ func NewServer(addr string, api API, limits Limits, disableResponseCompression b
 		searchMetricNamesRequests:   metrics.NewCounter(fmt.Sprintf(`vm_vmselect_rpc_requests_total{action="searchMetricNames",addr=%q}`, addr)),
 		searchRequests:              metrics.NewCounter(fmt.Sprintf(`vm_vmselect_rpc_requests_total{action="search",addr=%q}`, addr)),
 		tenantsRequests:             metrics.NewCounter(fmt.Sprintf(`vm_vmselect_rpc_requests_total{action="tenants",addr=%q}`, addr)),
+		searchMetadataRequests:      metrics.NewCounter(fmt.Sprintf(`vm_vmselect_rpc_requests_total{action="searchMetadata",addr=%q}`, addr)),
 
 		metricBlocksRead: metrics.NewCounter(fmt.Sprintf(`vm_vmselect_metric_blocks_read_total{addr=%q}`, addr)),
-		metricRowsRead:   metrics.NewCounter(fmt.Sprintf(`vm_vmselect_metric_rows_read_total{addr=%q}`, addr)),
 	}
 
 	s.connsMap.Init("vmselect")
-	s.wg.Add(1)
-	go func() {
-		s.run()
-		s.wg.Done()
-	}()
+	s.wg.Go(s.run)
 	return s, nil
 }
 
@@ -172,12 +170,10 @@ func (s *Server) run() {
 			return
 		}
 		s.vmselectConns.Inc()
-		s.wg.Add(1)
-		go func() {
+		s.wg.Go(func() {
 			defer func() {
 				s.connsMap.Delete(c)
 				s.vmselectConns.Dec()
-				s.wg.Done()
 			}()
 
 			// Compress responses to vmselect even if they already contain compressed blocks.
@@ -219,7 +215,7 @@ func (s *Server) run() {
 				s.vmselectConnErrors.Inc()
 				logger.Errorf("cannot process vmselect conn %s: %s", c.RemoteAddr(), err)
 			}
-		}()
+		})
 	}
 }
 
@@ -296,7 +292,6 @@ type vmselectRequestCtx struct {
 
 	qt *querytracer.Tracer
 	sq storage.SearchQuery
-	mb storage.MetricBlock
 
 	// timeout in seconds for the current request
 	timeout uint64
@@ -544,10 +539,7 @@ func (s *Server) beginConcurrentRequest(ctx *vmselectRequestCtx) error {
 	case s.concurrencyLimitCh <- struct{}{}:
 		return nil
 	default:
-		d := time.Duration(ctx.timeout) * time.Second
-		if d > s.limits.MaxQueueDuration {
-			d = s.limits.MaxQueueDuration
-		}
+		d := min(time.Duration(ctx.timeout)*time.Second, s.limits.MaxQueueDuration)
 		t := timerpool.Get(d)
 		s.concurrencyLimitReached.Inc()
 		select {
@@ -597,6 +589,8 @@ func (s *Server) processRPC(ctx *vmselectRequestCtx, rpcName string) error {
 		return s.processMetricNamesUsageStats(ctx)
 	case "resetMetricNamesStats_v1":
 		return s.processResetMetricUsageStats(ctx)
+	case "searchMetadata_v1":
+		return s.processSearchMetadata(ctx)
 	default:
 		return fmt.Errorf("unsupported rpcName: %q", rpcName)
 	}
@@ -617,7 +611,7 @@ func (s *Server) processRegisterMetricNames(ctx *vmselectRequestCtx) error {
 		return fmt.Errorf("too many metric names in a single request; got %d; mustn't exceed %d", metricsCount, maxMetricNamesPerRequest)
 	}
 	mrs := make([]storage.MetricRow, metricsCount)
-	for i := 0; i < int(metricsCount); i++ {
+	for i := range int(metricsCount) {
 		if err := ctx.readDataBufBytes(maxMetricNameRawSize); err != nil {
 			return fmt.Errorf("cannot read metricNameRaw: %w", err)
 		}
@@ -1064,16 +1058,19 @@ func (s *Server) processSearch(ctx *vmselectRequestCtx) error {
 
 	// Send found blocks to vmselect.
 	blocksRead := 0
-	for bi.NextBlock(&ctx.mb) {
+	var ok bool
+	for {
+		ctx.dataBuf, ok = bi.NextBlock(ctx.dataBuf[:0])
+		if !ok {
+			break
+		}
 		blocksRead++
 		s.metricBlocksRead.Inc()
-		s.metricRowsRead.Add(ctx.mb.Block.RowsCount())
-
-		ctx.dataBuf = ctx.mb.Marshal(ctx.dataBuf[:0])
 		if err := ctx.writeDataBufBytes(); err != nil {
 			return fmt.Errorf("cannot send MetricBlock: %w", err)
 		}
 	}
+
 	if err := bi.Error(); err != nil {
 		return fmt.Errorf("search error: %w", err)
 	}
@@ -1180,5 +1177,71 @@ func (s *Server) processResetMetricUsageStats(ctx *vmselectRequestCtx) error {
 	if err := s.api.ResetMetricNamesUsageStats(ctx.qt, ctx.deadline); err != nil {
 		return fmt.Errorf("cannot reset state of the metric names usage tracker: %w", err)
 	}
+	return nil
+}
+
+func (s *Server) processSearchMetadata(ctx *vmselectRequestCtx) error {
+	s.searchMetadataRequests.Inc()
+
+	// Read request.
+	hasTenant, err := ctx.readBool()
+	if err != nil {
+		return fmt.Errorf("cannot read hasTenant: %w", err)
+	}
+	var at *storage.TenantToken
+	if hasTenant {
+		accountID, err := ctx.readUint32()
+		if err != nil {
+			return fmt.Errorf("cannot read accountID: %w", err)
+		}
+		projectID, err := ctx.readUint32()
+		if err != nil {
+			return fmt.Errorf("cannot read projectID: %w", err)
+		}
+		at = &storage.TenantToken{
+			AccountID: accountID,
+			ProjectID: projectID,
+		}
+	}
+	limit, err := ctx.readLimit()
+	if err != nil {
+		return fmt.Errorf("cannot read limit: %w", err)
+	}
+	if err := ctx.readDataBufBytes(1024); err != nil {
+		return fmt.Errorf("cannot read metric name: %w", err)
+	}
+	metricName := string(ctx.dataBuf)
+
+	if err := s.beginConcurrentRequest(ctx); err != nil {
+		return ctx.writeErrorMessage(err)
+	}
+	defer s.endConcurrentRequest()
+
+	result, err := s.api.GetMetadataRecords(ctx.qt, at, limit, metricName, ctx.deadline)
+	if err != nil {
+		return ctx.writeErrorMessage(err)
+	}
+
+	// Send an empty error message to vmselect.
+	if err := ctx.writeString(""); err != nil {
+		return fmt.Errorf("cannot send empty error message: %w", err)
+	}
+	if err := writeMetadataRows(ctx, result); err != nil {
+		return fmt.Errorf("cannot write metadata rows: %w", err)
+	}
+	return nil
+}
+
+func writeMetadataRows(ctx *vmselectRequestCtx, records []*metricsmetadata.Row) error {
+	if err := ctx.writeUint64(uint64(len(records))); err != nil {
+		return fmt.Errorf("cannot write metadata rows count: %w", err)
+	}
+	for _, r := range records {
+		ctx.dataBuf = r.MarshalTo(ctx.dataBuf[:0])
+		if err := ctx.writeDataBufBytes(); err != nil {
+			return fmt.Errorf("cannot write metadata rows: %w", err)
+		}
+	}
+
 	return nil
 }

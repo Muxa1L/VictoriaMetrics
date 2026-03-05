@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"math/rand"
 	"regexp"
 	"strconv"
 	"sync/atomic"
@@ -44,7 +43,8 @@ func BenchmarkIndexDBAddTSIDs(b *testing.B) {
 	const path = "BenchmarkIndexDBAddTSIDs"
 	timestamp := time.Date(2025, 3, 17, 0, 0, 0, 0, time.UTC).UnixMilli()
 	s := MustOpenStorage(path, OpenOptions{})
-	idbPrev, idbCurr := s.getPrevAndCurrIndexDBs()
+	ptw := s.tb.MustGetPartition(timestamp)
+	db := ptw.pt.idb
 
 	const recordsPerLoop = 1e3
 
@@ -55,7 +55,7 @@ func BenchmarkIndexDBAddTSIDs(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		var mn MetricName
-		var genTSID generationTSID
+		var tsid TSID
 		mn.AccountID = goroutineID.Add(1)
 
 		// The most common tags.
@@ -70,28 +70,28 @@ func BenchmarkIndexDBAddTSIDs(b *testing.B) {
 
 		startOffset := 0
 		for pb.Next() {
-			benchmarkIndexDBAddTSIDs(idbCurr, &genTSID, &mn, timestamp, startOffset, recordsPerLoop)
+			benchmarkIndexDBAddTSIDs(db, &tsid, &mn, timestamp, startOffset, recordsPerLoop)
 			startOffset += recordsPerLoop
 		}
 	})
 	b.StopTimer()
 
-	s.putPrevAndCurrIndexDBs(idbPrev, idbCurr)
+	s.tb.PutPartition(ptw)
 	s.MustClose()
 	fs.MustRemoveDir(path)
 }
 
-func benchmarkIndexDBAddTSIDs(db *indexDB, genTSID *generationTSID, mn *MetricName, timestamp int64, startOffset, recordsPerLoop int) {
+func benchmarkIndexDBAddTSIDs(db *indexDB, tsid *TSID, mn *MetricName, timestamp int64, startOffset, recordsPerLoop int) {
 	date := uint64(timestamp) / msecPerDay
-	for i := 0; i < recordsPerLoop; i++ {
+	for i := range recordsPerLoop {
 		mn.MetricGroup = strconv.AppendUint(mn.MetricGroup[:0], uint64(i+startOffset), 10)
 		for j := range mn.Tags {
 			mn.Tags[j].Value = strconv.AppendUint(mn.Tags[j].Value[:0], uint64(i*j), 16)
 		}
 		mn.sortTags()
 
-		generateTSID(&genTSID.TSID, mn)
-		createAllIndexesForMetricName(db, mn, &genTSID.TSID, date)
+		generateTSID(tsid, mn)
+		createAllIndexesForMetricName(db, mn, tsid, date)
 	}
 }
 
@@ -101,13 +101,14 @@ func BenchmarkHeadPostingForMatchers(b *testing.B) {
 	const path = "BenchmarkHeadPostingForMatchers"
 	timestamp := int64(0)
 	s := MustOpenStorage(path, OpenOptions{})
-	idbPrev, idbCurr := s.getPrevAndCurrIndexDBs()
+	ptw := s.tb.MustGetPartition(timestamp)
+	db := ptw.pt.idb
 
 	// Fill the db with data as in https://github.com/prometheus/prometheus/blob/23c0299d85bfeb5d9b59e994861553a25ca578e5/tsdb/head_bench_test.go#L66
 	const accountID = 34327843
 	const projectID = 893433
 	var mn MetricName
-	var genTSID generationTSID
+	var tsid TSID
 	date := uint64(timestamp) / msecPerDay
 	addSeries := func(kvs ...string) {
 		mn.Reset()
@@ -117,12 +118,12 @@ func BenchmarkHeadPostingForMatchers(b *testing.B) {
 		mn.sortTags()
 		mn.AccountID = accountID
 		mn.ProjectID = projectID
-		generateTSID(&genTSID.TSID, &mn)
-		createAllIndexesForMetricName(idbCurr, &mn, &genTSID.TSID, date)
+		generateTSID(&tsid, &mn)
+		createAllIndexesForMetricName(db, &mn, &tsid, date)
 	}
-	for n := 0; n < 10; n++ {
+	for n := range 10 {
 		ns := strconv.Itoa(n)
-		for i := 0; i < 100000; i++ {
+		for i := range 100000 {
 			ix := strconv.Itoa(i)
 			addSeries("i", ix, "n", ns, "j", "foo")
 			// Have some series that won't be matched, to properly test inverted matches.
@@ -142,10 +143,10 @@ func BenchmarkHeadPostingForMatchers(b *testing.B) {
 		// Use special globalIndexTimeRange to instruct indexDB to search global
 		// index instead of per-day index.
 		tr := globalIndexTimeRange
-		for i := 0; i < b.N; i++ {
-			is := idbCurr.getIndexSearch(tfs.accountID, tfs.projectID, noDeadline)
+		for range b.N {
+			is := db.getIndexSearch(tfs.accountID, tfs.projectID, noDeadline)
 			metricIDs, err := is.searchMetricIDs(nil, tfss, tr, 2e9)
-			idbCurr.putIndexSearch(is)
+			db.putIndexSearch(is)
 			if err != nil {
 				b.Fatalf("unexpected error in searchMetricIDs: %s", err)
 			}
@@ -262,7 +263,7 @@ func BenchmarkHeadPostingForMatchers(b *testing.B) {
 		benchSearch(b, tfs, 88889)
 	})
 
-	s.putPrevAndCurrIndexDBs(idbPrev, idbCurr)
+	s.tb.PutPartition(ptw)
 	s.MustClose()
 	fs.MustRemoveDir(path)
 }
@@ -271,7 +272,8 @@ func BenchmarkIndexDBGetTSIDs(b *testing.B) {
 	const path = "BenchmarkIndexDBGetTSIDs"
 	timestamp := time.Date(2025, 3, 17, 0, 0, 0, 0, time.UTC).UnixMilli()
 	s := MustOpenStorage(path, OpenOptions{})
-	idbPrev, idbCurr := s.getPrevAndCurrIndexDBs()
+	ptw := s.tb.MustGetPartition(timestamp)
+	db := ptw.pt.idb
 
 	const recordsPerLoop = 1000
 	const accountsCount = 111
@@ -281,79 +283,49 @@ func BenchmarkIndexDBGetTSIDs(b *testing.B) {
 	// Fill the db with recordsCount records.
 	var mn MetricName
 	mn.MetricGroup = []byte("rps")
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		key := fmt.Sprintf("key_%d", i)
 		value := fmt.Sprintf("value_%d", i)
 		mn.AddTag(key, value)
 	}
 	mn.sortTags()
 
-	var genTSID generationTSID
+	var tsid TSID
 	date := uint64(timestamp) / msecPerDay
 
-	for i := 0; i < recordsCount; i++ {
+	for i := range int(recordsCount) {
 		mn.AccountID = uint32(i % accountsCount)
 		mn.ProjectID = uint32(i % projectsCount)
-		generateTSID(&genTSID.TSID, &mn)
-		createAllIndexesForMetricName(idbCurr, &mn, &genTSID.TSID, date)
+		generateTSID(&tsid, &mn)
+		createAllIndexesForMetricName(db, &mn, &tsid, date)
 	}
-	idbCurr.s.DebugFlush()
+	db.s.DebugFlush()
 
 	b.SetBytes(recordsPerLoop)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		var genTSIDLocal generationTSID
+		var tsidLocal TSID
 		var metricNameLocal []byte
 		var mnLocal MetricName
 		mnLocal.CopyFrom(&mn)
 		mnLocal.sortTags()
 		for pb.Next() {
-			is := idbCurr.getIndexSearch(0, 0, noDeadline)
-			for i := 0; i < recordsPerLoop; i++ {
+			is := db.getIndexSearch(0, 0, noDeadline)
+			for i := range recordsPerLoop {
 				mnLocal.AccountID = uint32(i % accountsCount)
 				mnLocal.ProjectID = uint32(i % projectsCount)
 				metricNameLocal = mnLocal.Marshal(metricNameLocal[:0])
-				if !is.getTSIDByMetricName(&genTSIDLocal, metricNameLocal, date) {
+				if !is.getTSIDByMetricName(&tsidLocal, metricNameLocal, date) {
 					panic(fmt.Errorf("cannot obtain tsid for row %d", i))
 				}
 			}
-			idbCurr.putIndexSearch(is)
+			db.putIndexSearch(is)
 		}
 	})
 	b.StopTimer()
 
-	s.putPrevAndCurrIndexDBs(idbPrev, idbCurr)
+	s.tb.PutPartition(ptw)
 	s.MustClose()
 	fs.MustRemoveDir(path)
-}
-
-func BenchmarkMarshalUnmarshalMetricIDs(b *testing.B) {
-	rng := rand.New(rand.NewSource(1))
-
-	f := func(b *testing.B, numMetricIDs int) {
-		metricIDs := make([]uint64, numMetricIDs)
-		// metric IDs need to be sorted.
-		ts := uint64(time.Now().UnixNano())
-		for i := range numMetricIDs {
-			metricIDs[i] = ts + uint64(rng.Intn(100))
-		}
-
-		var marshalledLen int
-		b.ResetTimer()
-		for range b.N {
-			marshalled := marshalMetricIDs(nil, metricIDs)
-			marshalledLen = len(marshalled)
-			_ = mustUnmarshalMetricIDs(nil, marshalled)
-		}
-		b.StopTimer()
-		compressionRate := float64(numMetricIDs*8) / float64(marshalledLen)
-		b.ReportMetric(compressionRate, "compression-rate")
-	}
-
-	for _, n := range []int{0, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7} {
-		b.Run(fmt.Sprintf("numMetricIDs-%d", n), func(b *testing.B) {
-			f(b, n)
-		})
-	}
 }

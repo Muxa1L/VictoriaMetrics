@@ -46,11 +46,12 @@ const Select: FC<SelectProps> = ({
   const autocompleteAnchorEl = useRef<HTMLDivElement>(null);
   const [wrapperRef, setWrapperRef] = useState<React.RefObject<HTMLElement> | null>(null);
   const [openList, setOpenList] = useState(false);
+  const resultList = [...list];
 
   const inputRef = useRef<HTMLInputElement>(null);
 
   const isMultiple = Array.isArray(value);
-  const selectedValues = Array.isArray(value) ? value.slice() : [];
+  let selectedValues = Array.isArray(value) ? value.slice() : [];
   const hideInput = isMobile && isMultiple && !!selectedValues?.length;
 
   const textFieldValue = useMemo(() => {
@@ -77,7 +78,7 @@ const Select: FC<SelectProps> = ({
   };
 
   const handleBlur = () => {
-    list.includes(search) && onChange(search);
+    resultList.includes(search) && onChange(search);
   };
 
   const handleToggleList = (e: MouseEvent<HTMLDivElement>) => {
@@ -123,8 +124,10 @@ const Select: FC<SelectProps> = ({
   useEventListener("keyup", handleKeyUp);
   useClickOutside(autocompleteAnchorEl, handleCloseList, wrapperRef);
 
-  includeAll && !list.includes("All") && list.push("All");
-  includeAll && !selectedValues?.length && selectedValues.push("All");
+  if (includeAll && !resultList.includes("All")) resultList.push("All");
+  if (includeAll && (!selectedValues?.length || selectedValues?.length === resultList?.length)) {
+    selectedValues = ["All"];
+  }
 
   return (
     <div
@@ -134,6 +137,7 @@ const Select: FC<SelectProps> = ({
         "vm-select_disabled": disabled
       })}
     >
+      {label && <span className="vm-text-field__label">{label}</span>}
       <div
         className="vm-select-input"
         onClick={handleToggleList}
@@ -147,7 +151,7 @@ const Select: FC<SelectProps> = ({
               onRemoveItem={handleSelected}
             />
           )}
-          {!hideInput && !selectedValues?.length && (
+          {!hideInput && (
             <input
               value={textFieldValue}
               type="text"
@@ -155,12 +159,12 @@ const Select: FC<SelectProps> = ({
               onInput={handleChange}
               onFocus={handleFocus}
               onBlur={handleBlur}
+              disabled={disabled}
               ref={inputRef}
               readOnly={isMobile || !searchable}
             />
           )}
         </div>
-        {label && <span className="vm-text-field__label">{label}</span>}
         {clearable && value && (
           <div
             className="vm-select-input__icon"
@@ -182,7 +186,7 @@ const Select: FC<SelectProps> = ({
         itemClassName={itemClassName}
         label={label}
         value={autocompleteValue}
-        options={list.map(l => ({ value: l }))}
+        options={resultList.map(l => ({ value: l }))}
         anchor={autocompleteAnchorEl}
         selected={selectedValues}
         minLength={1}

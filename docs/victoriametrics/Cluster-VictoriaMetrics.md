@@ -12,31 +12,24 @@ aliases:
   - /Cluster-VictoriaMetrics.html
   - /cluster-victoriametrics/index.html
   - /cluster-victoriametrics/
+  - /Cluster-VictoriaMetrics/
 ---
 
-VictoriaMetrics is a fast, cost-effective and scalable time series database. It can be used as a long-term remote storage for Prometheus.
+VictoriaMetrics is a fast, cost-effective, and scalable solution for monitoring and managing time series data. It delivers high performance and reliability, making it an ideal choice for businesses of all sizes.
 
-It is recommended to use the [single-node version](https://github.com/VictoriaMetrics/VictoriaMetrics) instead of the cluster version
-for ingestion rates lower than a million data points per second.
-The single-node version [scales perfectly](https://medium.com/@valyala/measuring-vertical-scalability-for-time-series-databases-in-google-cloud-92550d78d8ae)
-with the number of CPU cores, RAM and available storage space and can be set up in [High Availability](https://docs.victoriametrics.com/#high-availability) mode.
-The single-node version is easier to configure and operate compared to the cluster version, so think twice before choosing the cluster version.
-See [this question](https://docs.victoriametrics.com/victoriametrics/faq/#which-victoriametrics-type-is-recommended-for-use-in-production---single-node-or-cluster) for more details.
+- **Case studies**: [Grammarly, Roblox, Wix, Spotify,...](https://docs.victoriametrics.com/victoriametrics/casestudies/).
+- **Available**: [Binary releases](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/latest), Docker images on [Docker Hub](https://hub.docker.com/r/victoriametrics/victoria-metrics/) and [Quay](https://quay.io/repository/victoriametrics/victoria-metrics), [Source code](https://github.com/VictoriaMetrics/VictoriaMetrics).
+- **Deployment types**: [Single-node version](https://docs.victoriametrics.com/) and [Cluster version](https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/) under [Apache License 2.0](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/master/LICENSE).
+- **Getting started:** Read [key concepts](https://docs.victoriametrics.com/victoriametrics/keyconcepts/) and follow the
+  [quick start guide](https://docs.victoriametrics.com/victoriametrics/quick-start/).
+- **Community**: [Slack](https://slack.victoriametrics.com/)(join via [Slack Inviter](https://slack.victoriametrics.com/)), [X (Twitter)](https://x.com/VictoriaMetrics), [YouTube](https://www.youtube.com/@VictoriaMetrics). See full list [here](https://docs.victoriametrics.com/victoriametrics/#community-and-contributions).
+- **Changelog**: Project evolves fast - check the [CHANGELOG](https://docs.victoriametrics.com/victoriametrics/changelog/), and [How to upgrade](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-upgrade-victoriametrics).
+- **Enterprise support:** [Contact us](mailto:info@victoriametrics.com) for commercial support with additional [enterprise features](https://docs.victoriametrics.com/victoriametrics/enterprise/).
+- **Enterprise releases:** Enterprise and [long-term support releases (LTS)](https://docs.victoriametrics.com/victoriametrics/lts-releases/) are publicly available and can be evaluated for free
+  using a [free trial license](https://victoriametrics.com/products/enterprise/trial/).
+- **Security:** we achieved [security certifications](https://victoriametrics.com/security/) for Database Software Development and Software-Based Monitoring Services.
 
 There is also user-friendly database for logs - [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/).
-
-If you have questions about VictoriaMetrics, then feel free asking them at [VictoriaMetrics community Slack chat](https://victoriametrics.slack.com/),
-you can join it via [Slack Inviter](https://slack.victoriametrics.com/).
-
-[Contact us](mailto:info@victoriametrics.com) if you need enterprise support for VictoriaMetrics.
-See [features available in enterprise package](https://docs.victoriametrics.com/victoriametrics/enterprise/).
-Enterprise binaries can be downloaded and evaluated for free
-from [the releases page](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/latest).
-See how to request a free [trial license](https://victoriametrics.com/products/enterprise/trial/).
-
-VictoriaMetrics is developed at a fast pace, so it is recommended periodically checking the [CHANGELOG](https://docs.victoriametrics.com/victoriametrics/changelog/) and performing [regular upgrades](https://docs.victoriametrics.com/victoriametrics/#how-to-upgrade-victoriametrics).
-
-VictoriaMetrics has achieved security certifications for Database Software Development and Software-Based Monitoring Services. We apply strict security measures in everything we do. See our [Security page](https://victoriametrics.com/security/) for more details.
 
 ## Prominent features
 
@@ -44,6 +37,12 @@ VictoriaMetrics has achieved security certifications for Database Software Devel
 - Performance and capacity scale horizontally. See [these docs for details](#cluster-resizing-and-scalability).
 - Supports multiple independent namespaces for time series data (aka multi-tenancy). See [these docs for details](#multitenancy).
 - Supports replication. See [these docs for details](#replication-and-data-safety).
+
+> It is recommended to use the [single-node version](https://github.com/VictoriaMetrics/VictoriaMetrics) for ingestion rates
+> lower than a million data points per second. The single-node version [scales perfectly](https://medium.com/@valyala/measuring-vertical-scalability-for-time-series-databases-in-google-cloud-92550d78d8ae)
+> with the number of CPU cores, RAM and available storage space and can be set up in [High Availability](https://docs.victoriametrics.com/victoriametrics/#high-availability) mode.
+> The single-node version is easier to configure and operate compared to the cluster version, so think twice before choosing the cluster version.
+> See [this question](https://docs.victoriametrics.com/victoriametrics/faq/#which-victoriametrics-type-is-recommended-for-use-in-production---single-node-or-cluster) for more details.
 
 ## Architecture overview
 
@@ -58,9 +57,7 @@ Each service may scale independently and may run on the most suitable hardware.
 This is a [shared nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture).
 It increases cluster availability, and simplifies cluster maintenance as well as cluster scaling.
 
-![Cluster Scheme](Cluster-VictoriaMetrics_cluster-scheme.webp)
-
-> Note that `vmselect` despite being stateless still requires some disk space (a few GBs) for temporary caches. Refer to the `-cacheDataPath` command-line flag for more details.
+![Cluster Scheme](Cluster-VictoriaMetrics-components.webp)
 
 ## vmui
 
@@ -139,6 +136,7 @@ Currently supported endpoints for `<suffix>` are:
 - `/prometheus/api/v1/status/tsdb`
 - `/prometheus/api/v1/export`
 - `/prometheus/api/v1/export/csv`
+- `/prometheus/api/v1/metadata`
 - `/vmui`
 
 It is allowed to explicitly specify tenant IDs via `vm_account_id` and `vm_project_id` labels in the query.
@@ -251,7 +249,7 @@ If you need multi-AZ setup, then it is recommended running independent clusters 
 into all the cluster - see [these docs](https://docs.victoriametrics.com/victoriametrics/vmagent/#multitenancy) for details.
 Then an additional `vmselect` nodes can be configured for reading the data from multiple clusters according to [these docs](#multi-level-cluster-setup).
 
-See [victoria-metrics-distributed chart](https://docs.victoriametrics.com/helm/victoriametrics-distributed/) for an example.
+See [victoria-metrics-distributed chart](https://docs.victoriametrics.com/helm/victoria-metrics-distributed/) for an example.
 
 ## Cluster setup
 
@@ -376,8 +374,10 @@ The multi-level cluster setup for `vminsert` nodes has the following shortcoming
 - Data ingestion speed is limited by the slowest link to AZ.
 - `vminsert` nodes at top level re-route incoming data to the remaining AZs when some AZs are temporarily unavailable. This results in data gaps at AZs which were temporarily unavailable.
 
-These issues are addressed by [vmagent](https://docs.victoriametrics.com/victoriametrics/vmagent/) when it runs in [multitenancy mode](https://docs.victoriametrics.com/victoriametrics/vmagent/#multitenancy).
-`vmagent` buffers data, which must be sent to a particular AZ, when this AZ is temporarily unavailable. The buffer is stored on disk. The buffered data is sent to AZ as soon as it becomes available.
+These issues are addressed by [vmagent](https://docs.victoriametrics.com/victoriametrics/vmagent/) when it runs in front of AZs
+to [replicate](https://docs.victoriametrics.com/victoriametrics/vmagent/#replication-and-high-availability) or [shard](https://docs.victoriametrics.com/victoriametrics/vmagent/#sharding-among-remote-storages)
+data stream. If AZ is temporarily unavailable, `vmagent` [buffers](https://docs.victoriametrics.com/victoriametrics/vmagent/#on-disk-persistence)
+its data on-disk (see `--remoteWrite.maxDiskUsagePerURL`) without affecting other destinations. The buffered data is sent to AZ as soon as it becomes available.
 
 See the [cluster instability troubleshooting guide](https://docs.victoriametrics.com/victoriametrics/troubleshooting/#cluster-instability) for details on diagnosing and mitigating networking problems.
 
@@ -547,7 +547,7 @@ By default, the following TCP ports are used:
 
 Use [the official Grafana dashboard for VictoriaMetrics cluster](https://grafana.com/grafana/dashboards/11176).
 
-See more details on [how to monitor VictoriaMetrics components](https://docs.victoriametrics.com/#monitoring).
+See more details on [how to monitor VictoriaMetrics components](https://docs.victoriametrics.com/victoriametrics/#monitoring).
 
 ## Cardinality limiter
 
@@ -595,7 +595,7 @@ Check practical examples of [VictoriaMetrics API](https://docs.victoriametrics.c
     - `prometheus/api/v1/import/native` - for importing data obtained via `api/v1/export/native` on `vmselect` (see below).
     - `prometheus/api/v1/import/csv` - for importing arbitrary CSV data. See [these docs](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-import-csv-data) for details.
     - `prometheus/api/v1/import/prometheus` - for importing data in [Prometheus text exposition format](https://github.com/prometheus/docs/blob/master/content/docs/instrumenting/exposition_formats.md#text-based-format) and in [OpenMetrics format](https://github.com/OpenObservability/OpenMetrics/blob/master/specification/OpenMetrics.md). This endpoint also supports [Pushgateway protocol](https://github.com/prometheus/pushgateway#url). See [these docs](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-import-data-in-prometheus-exposition-format) for details.
-    - `opentelemetry/v1/metrics` - for ingesting data via [OpenTelemetry protocol for metrics](https://github.com/open-telemetry/opentelemetry-specification/blob/ffddc289462dfe0c2041e3ca42a7b1df805706de/specification/metrics/data-model.md). See [these docs](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#sending-data-via-opentelemetry).
+    - `opentelemetry/v1/metrics` - for ingesting data via [OpenTelemetry protocol for metrics](https://github.com/open-telemetry/opentelemetry-specification/blob/97c826b70e2f89cfdf655d5150791f3f0c2bae19/specification/metrics/data-model.md). See [these docs](https://docs.victoriametrics.com/victoriametrics/integrations/opentelemetry/).
     - `datadog/api/v1/series` - for ingesting data with DataDog submit metrics API v1. See [these docs](https://docs.victoriametrics.com/victoriametrics/url-examples/#datadogapiv1series) for details.
     - `datadog/api/v2/series` - for ingesting data with [DataDog submit metrics API](https://docs.datadoghq.com/api/latest/metrics/#submit-metrics). See [these docs](https://docs.victoriametrics.com/victoriametrics/integrations/datadog/) for details.
     - `datadog/api/beta/sketches` - for ingesting data with [DataDog lambda extension](https://docs.datadoghq.com/serverless/libraries_integrations/extension/).
@@ -604,7 +604,9 @@ Check practical examples of [VictoriaMetrics API](https://docs.victoriametrics.c
     - `opentsdb/api/put` - for accepting [OpenTSDB HTTP /api/put requests](http://opentsdb.net/docs/build/html/api_http/put.html). This handler is disabled by default. It is exposed on a distinct TCP address set via `-opentsdbHTTPListenAddr` command-line flag. See [these docs](https://docs.victoriametrics.com/victoriametrics/integrations/opentsdb/#sending-data-via-http) for details.
 
 - URLs for [Prometheus querying API](https://prometheus.io/docs/prometheus/latest/querying/api/): `http://<vmselect>:8481/select/<accountID>/prometheus/<suffix>`, where:
-  - `<accountID>` is an arbitrary number identifying data namespace for the query (aka tenant)
+  - `<accountID>` is an arbitrary number identifying data namespace for the query (aka tenant). It is possible to set it as `accountID:projectID`,
+  where `projectID` is also arbitrary 32-bit integer. If `projectID` isn't set, then it equals to `0`. See [multitenancy docs](#multitenancy) for more details.
+  The `<accountID>` can be set to `multitenant` string, e.g. `http://<vmselect>:8481/select/multitenant/<suffix>` for querying over multiple tenants (see the full list of [supported multitenant read endpoints](https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/#multitenancy-via-labels)).
   - `<suffix>` may have the following values:
     - `api/v1/query` - performs [PromQL instant query](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#instant-query).
     - `api/v1/query_range` - performs [PromQL range query](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#range-query).
@@ -620,6 +622,7 @@ Check practical examples of [VictoriaMetrics API](https://docs.victoriametrics.c
     - `api/v1/status/active_queries` - for currently executed active queries. Note that every `vmselect` maintains an independent list of active queries,
       which is returned in the response.
     - `api/v1/status/top_queries` - for listing the most frequently executed queries and queries taking the most duration.
+    - `api/v1/metadata` - for fetching [metrics metadata](https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata). See [these docs](#metrics-metadata) for more details.
     - `metric-relabel-debug` - for debugging [relabeling rules](https://docs.victoriametrics.com/victoriametrics/relabeling/).
 
 - URLs for [Graphite Metrics API](https://graphite-api.readthedocs.io/en/latest/api.html#the-metrics-api): `http://<vmselect>:8481/select/<accountID>/graphite/<suffix>`, where:
@@ -774,11 +777,32 @@ The following approaches can be used for reducing resource usage at `vmstorage` 
 
 See also [minimum downtime strategy](#minimum-downtime-strategy).
 
+## Slowness-based re-routing
+
+By default, `vminsert` nodes limit the cluster's overall ingestion rate to the throughput of the slowest `vmstorage` node. 
+This ensures that incoming metrics are evenly distributed across all `vmstorage` nodes. 
+The downside is that a single slow vmstorage node can throttle the entire cluster.
+
+When `-disableRerouting=false` is enabled on `vminsert`, 
+the cluster will automatically re-route writes away from the slowest vmstorage node to preserve maximum ingestion throughput.
+
+Re-routing occurs only when all of the following conditions hold:
+- the storage send buffer is full.
+- the saturated vmstorage node is the slowest.
+- the vmstorage cluster have much lower saturation overall.
+- the vmstorage cluster has at least three ready nodes.
+
+Enable slowness-based re-routing when peak write throughput matters more 
+than minimizing the number of [active time series](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-an-active-time-series)
+or keeping metrics perfectly balanced across nodes.
+
+The rerouting and node saturation could be seen at  [VictoriaMetrics - cluster](https://grafana.com/grafana/dashboards/11176) dashboard.
+
 ## Capacity planning
 
 VictoriaMetrics uses lower amounts of CPU, RAM and storage space on production workloads compared to competing solutions (Prometheus, Thanos, Cortex, TimescaleDB, InfluxDB, QuestDB, M3DB) according to [our case studies](https://docs.victoriametrics.com/victoriametrics/casestudies/).
 
-Each node type - `vminsert`, `vmselect` and `vmstorage` - can run on the most suitable hardware. Cluster capacity scales linearly with the available resources. The needed amounts of CPU and RAM per each node type highly depends on the workload - the number of [active time series](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-an-active-time-series), [series churn rate](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-high-churn-rate), query types, query qps, etc. It is recommended setting up a test VictoriaMetrics cluster for your production workload and iteratively scaling per-node resources and the number of nodes per node type until the cluster becomes stable. It is recommended setting up [monitoring for the cluster](#monitoring). It helps to determine bottlenecks in cluster setup. It is also recommended following [the troubleshooting docs](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#troubleshooting).
+Each node type - `vminsert`, `vmselect` and `vmstorage` - can run on the most suitable hardware. Cluster capacity scales linearly with the available resources. The needed amounts of CPU and RAM per each node type highly depends on the workload - the number of [active time series](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-an-active-time-series), [series churn rate](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-high-churn-rate), query types, query qps, etc. It is recommended to setup a test VictoriaMetrics cluster for your production workload and iteratively scale per-node resources and the number of nodes per node type until the cluster becomes stable. It is recommended to setup [monitoring for the cluster](#monitoring). It helps to determine bottlenecks in the cluster setup. It is also recommended to follow [the troubleshooting docs](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#troubleshooting).
 
 The needed storage space for the given retention (the retention is set via `-retentionPeriod` command-line flag at `vmstorage`) can be extrapolated from disk space usage in a test run. For example, if the storage space usage is 10GB after a day-long test run on a production workload, then it will need at least `10GB*100=1TB` of disk space for `-retentionPeriod=100d` (100-days retention period). Storage space usage can be monitored with [the official Grafana dashboard for VictoriaMetrics cluster](#monitoring).
 
@@ -797,10 +821,39 @@ Some capacity planning tips for VictoriaMetrics cluster:
 - Cluster capacity for [active time series](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-an-active-time-series) can be increased by increasing RAM and CPU resources per each `vmstorage` node or by adding new `vmstorage` nodes.
 - Query latency can be reduced by increasing CPU resources per each `vmselect` node, since each incoming query is processed by a single `vmselect` node. Performance for heavy queries scales with the number of available CPU cores at `vmselect` node, since `vmselect` processes time series referred by the query on all the available CPU cores.
 - If the cluster needs to process incoming queries at a high rate, then its capacity can be increased by adding more `vmselect` nodes, so incoming queries could be spread among bigger number of `vmselect` nodes.
-- By default `vminsert` compresses the data it sends to `vmstorage` in order to reduce network bandwidth usage. The compression takes additional CPU resources at `vminsert`. If `vminsert` nodes have limited CPU, then the compression can be disabled by passing `-rpc.disableCompression` command-line flag at `vminsert` nodes.
 - By default `vmstorage` compresses the data it sends to `vmselect` during queries in order to reduce network bandwidth usage. The compression takes additional CPU resources at `vmstorage`. If `vmstorage` nodes have limited CPU, then the compression can be disabled by passing `-rpc.disableCompression` command-line flag at `vmstorage` nodes.
 
 See also [resource usage limits docs](#resource-usage-limits).
+
+## Rebalancing
+
+Every `vminsert` node evenly spreads (shards) incoming data among `vmstorage` nodes specified in the `-storageNode` command-line flag.
+This guarantees even distribution of the ingested data among `vmstorage` nodes. When new `vmstorage` nodes are added to the `-storageNode`
+command-line flag at `vminsert`, then only newly ingested data is distributed evenly among old and new `vmstorage` nodes, while
+historical data remains on the old `vmstorage` nodes. This speeds up data ingestion and querying for the majority of production workloads,
+since newly ingested data is evenly distributed among all the `vmstorage` nodes, while querying is usually performed over recently ingested data,
+which is already stored among all the `vmstorage` nodes. This also provides the following benefits:
+
+- Cluster availability and performance remains stable just after adding new `vmstorage` nodes, since network bandwidth, disk IO and CPU
+  isn't spent on data rebalancing among `vmstorage` nodes.
+- This eliminates all the possible hard-to-troubleshoot failures which may happen during automatic data rebalancing.
+  For example, what happens when some of `vmstorage` nodes become unavailable during data rebalancing?
+  Or what happens if new `vmstorage` nodes are added to the cluster while the previous data rebalancing isn't finished yet?
+- This allows building flexible cluster schemes when distinct subsets of `vminsert` nodes distribute incoming
+  data among different subsets of `vmstorage` nodes with different configs and hardware resources.
+
+There are the following approaches exist for data rebalancing among old and new `vmstorage` nodes:
+
+- To wait until historical data on the old `vmstorage` nodes is automatically deleted according
+  to the configured [retention](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#retention).
+- To pass only new `vmstorage` addresses to `-storageNode` command-line flag at `vminsert` nodes, while passing all the `vmstorage`
+  addresses to `-storageNode` command-line flag at `vmselect` nodes. This enables writing new data only to new `vmstorage` nodes,
+  while historical data from old `vmstorage` nodes remain available for querying via `vmselect` together with the newly ingested data.
+  Then wait until data sizes among old and new `vmstorage` nodes become equal and then add old `vmstorage` nodes the `-storageNode`
+  command-line flag at `vminsert` nodes.
+
+See also [capacity planning docs](https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/#capacity-planning)
+and [Why VictoriaMetrics misses automatic data re-balancing among vmstorage nodes?](https://docs.victoriametrics.com/victoriametrics/faq/#why-victoriametrics-misses-automatic-data-re-balancing-between-vmstorage-nodes).
 
 ## Resource usage limits
 
@@ -959,25 +1012,29 @@ deduplication can't be guaranteed when samples and sample duplicates for the sam
 It is recommended to set **the same** `-dedup.minScrapeInterval` command-line flag value to both `vmselect` and `vmstorage` nodes
 to ensure query results consistency, even if storage layer didn't complete deduplication yet.
 
+## Metrics Metadata
+
+Cluster version of VictoriaMetrics can store metric metadata (TYPE, HELP, UNIT) {{% available_from "v1.130.0" %}}.
+Metadata ingestion is enabled by default{{% available_from "v1.137.0" %}}. To disable it, set `-enableMetadata=false` on `vminsert`, and `vmagent`.
+
+The metadata is cached in-memory in a ring buffer and can use up to 1% of available memory by default (see `-storage.maxMetadataStorageSize` cmd-line flag).
+When in-memory size is exceeded, the least updated entries are dropped first. Entries that weren't updated for 1h are cleaned up automatically.
+
+> The following expression helps to understand if metadata cache capacity is utilized for more than 90%: `vm_metrics_metadata_storage_size_bytes / vm_metrics_metadata_storage_max_size_bytes > 0.9`.
+Setup [monitoring](https://docs.victoriametrics.com/victoriametrics/quick-start/#monitoring) and recommended alerting rules
+to get notified about cache capacity issues.
+
+Metadata is ingested independently from metrics, so a metric can exist without metadata, and vice versa.
+Metadata is expected to be ephemeral and constantly updated on ingestion. For this reason, metadata cache isn't
+persisted during storage restarts.
+
+Metadata supports [multitenancy](#multitenancy) and can be queried via the `/select/<accountID>/prometheus/api/v1/metadata` endpoint, which provides a response compatible with the Prometheus [metadata API](https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata).
+If multiple vmstorage nodes return metadata for the same metric family name, or if multiple tenants have metadata for the same metric family name, vmselect returns only the first matching result. 
+Duplicate metadata entries are not merged or deduplicated across storages or tenants. See [/api/v1/metadata](https://docs.victoriametrics.com/victoriametrics/url-examples/#apiv1metadata) example.
+
 ## Backups
 
-It is recommended performing periodical backups from [instant snapshots](https://medium.com/@valyala/how-victoriametrics-makes-instant-snapshots-for-multi-terabyte-time-series-data-e1f3fb0e0282)
-for protecting from user errors such as accidental data deletion.
-
-The following steps must be performed for each `vmstorage` node for creating a backup:
-
-1. Create an instant snapshot by navigating to `/snapshot/create` HTTP handler. It will create snapshot and return its name.
-1. Archive the created snapshot from `<-storageDataPath>/snapshots/<snapshot_name>` folder using [vmbackup](https://docs.victoriametrics.com/victoriametrics/vmbackup/).
-   The archival process doesn't interfere with `vmstorage` work, so it may be performed at any suitable time.
-1. Delete unused snapshots via `/snapshot/delete?snapshot=<snapshot_name>` or `/snapshot/delete_all` in order to free up occupied storage space.
-
-There is no need in synchronizing backups among all the `vmstorage` nodes.
-
-Restoring from backup:
-
-1. Stop `vmstorage` node with `kill -INT`.
-1. Restore data from backup using [vmrestore](https://docs.victoriametrics.com/victoriametrics/vmrestore/) into `-storageDataPath` directory.
-1. Start `vmstorage` node.
+For backup configuration, please refer for [vmbackup documentation](https://docs.victoriametrics.com/victoriametrics/vmbackup/).
 
 ## Retention filters
 
@@ -1099,16 +1156,37 @@ Report bugs and propose new features in our [GitHub Issues](https://github.com/V
 
 ### List of command-line flags for vminsert
 
-Below is the output for `/path/to/vminsert -help`:
+Pass `-help` to vminsert in order to see the list of supported command-line flags with their description.
 
-{{% content "vminsert_flags.md" %}}
+#### Common vminsert flags
+These flags are available in both VictoriaMetrics OSS and VictoriaMetrics Enterprise.
+{{% content "vminsert_common_flags.md" %}}
+
+#### Enterprise vminsert flags
+These flags are available only in [VictoriaMetrics enterprise](https://docs.victoriametrics.com/victoriametrics/enterprise/).
+{{% content "vminsert_enterprise_flags.md" %}}
+
 
 ### List of command-line flags for vmselect
 
-Below is the output for `/path/to/vmselect -help`:
+Pass `-help` to vmselect in order to see the list of supported command-line flags with their description.
 
-{{% content "vmselect_flags.md" %}}
+#### Common vmselect flags
+These flags are available in both VictoriaMetrics OSS and VictoriaMetrics Enterprise.
+{{% content "vmselect_common_flags.md" %}}
+
+#### Enterprise vmselect flags
+These flags are available only in [VictoriaMetrics enterprise](https://docs.victoriametrics.com/victoriametrics/enterprise/).
+{{% content "vmselect_enterprise_flags.md" %}}
 
 ### List of command-line flags for vmstorage
 
-{{% content "vmstorage_flags.md" %}}
+Pass `-help` to vmstorage in order to see the list of supported command-line flags with their description.
+
+#### Common vmstorage flags
+These flags are available in both VictoriaMetrics OSS and VictoriaMetrics Enterprise.
+{{% content "vmstorage_common_flags.md" %}}
+
+#### Enterprise vmstorage flags
+These flags are available only in [VictoriaMetrics enterprise](https://docs.victoriametrics.com/victoriametrics/enterprise/).
+{{% content "vmstorage_enterprise_flags.md" %}}

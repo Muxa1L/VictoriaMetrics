@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promscrape/discoveryutil"
@@ -66,12 +67,7 @@ func (eps *EndpointSlice) getTargetLabels(gw *groupWatcher) []*promutil.Labels {
 
 	// Append labels for skipped ports on seen pods.
 	portSeen := func(port int, ports []int) bool {
-		for _, p := range ports {
-			if p == port {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(ports, port)
 	}
 	appendPodMetadata := func(p *Pod, c *Container, seen []int, isInit bool) {
 		for _, cp := range c.Ports {
@@ -89,7 +85,7 @@ func (eps *EndpointSlice) getTargetLabels(gw *groupWatcher) []*promutil.Labels {
 			// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/4154
 			p.appendEndpointSliceLabels(m, eps)
 			if svc != nil {
-				svc.appendCommonLabels(m)
+				svc.appendCommonLabels(m, gw)
 			}
 			// Remove possible duplicate labels, which can appear after appendCommonLabels() call
 			m.RemoveDuplicates()
@@ -121,7 +117,7 @@ func getEndpointSliceLabelsForAddressAndPort(gw *groupWatcher, podPortsSeen map[
 	p *Pod, svc *Service) *promutil.Labels {
 	m := getEndpointSliceLabels(eps, addr, ea, epp)
 	if svc != nil {
-		svc.appendCommonLabels(m)
+		svc.appendCommonLabels(m, gw)
 	}
 	// See https://github.com/prometheus/prometheus/issues/10284
 	eps.Metadata.registerLabelsAndAnnotations("__meta_kubernetes_endpointslice", m)

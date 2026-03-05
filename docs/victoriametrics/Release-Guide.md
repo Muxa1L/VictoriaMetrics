@@ -68,14 +68,8 @@ and the candidate is deployed to the sandbox environment.
 1. Make sure you get all changes fetched.
 
    ```sh
-   git fetch --all
-   ```
-
-1. Make sure tests pass on branches `master`, `cluster`, `enterprise-single-node` and `enterprise-cluster`.
-
-   ```sh
-   make test-full
-   make check-all
+   git fetch opensource
+   git fetch enterprise
    ```
 
 1. Make sure all the changes are synced between `master`, `cluster`, `enterprise-single-node` and `enterprise-cluster` branches.
@@ -92,6 +86,25 @@ and the candidate is deployed to the sandbox environment.
 1. Review bugfixes in the changelog to determine if they need to be backported to LTS versions.
    Cherry-pick bug fixes relevant for [LTS releases](https://docs.victoriametrics.com/victoriametrics/lts-releases/).
    This serves as a double-check. The initial assessment should already have been done by the person who merged a PR.
+
+1. Make sure tests pass on branches `master`, `cluster`, `enterprise-single-node` and `enterprise-cluster`.
+
+   ```sh
+   make test-full
+   make check-all
+   ```
+
+1. Verify no CVEs in Go code or base images according to the [CVE handling policy](https://docs.victoriametrics.com/victoriametrics/#cve-handling-policy).
+   It’s sufficient to run `govulncheck` on the `master` branch since other branches are checked in CI on regular bases. 
+   For image scanning, build and check Alpine base image.
+
+   ```sh
+   make govulncheck
+   
+   make package-base
+   grype  --only-fixed [base-image-tag]
+   ```
+
 1. Re-build `vmui` static files. Static assets needs to be rebuilt separately for oss and enterprise branches (changes should not be cherry-picked between these branches). See [commit example](https://github.com/VictoriaMetrics/VictoriaMetrics/commit/9dde5b8ee3fdc9d4cd495c8118e04ff4ee32e650).
 
    ```sh
@@ -100,7 +113,7 @@ and the candidate is deployed to the sandbox environment.
 
 1. Make sure that the release branches have no security issues.
 1. Update release versions if needed in [SECURITY.md](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/master/SECURITY.md).
-1. Run `PKG_TAG=v1.xx.y make docs-update-version` command to update version help tooltips.
+1. Run `PKG_TAG=v1.xx.y make docs-update-version` command to update version help tooltips. 
 1. Cut new version in [CHANGELOG.md](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/master/docs/victoriametrics/changelog/CHANGELOG.md) and commit it. See example in this [commit](https://github.com/VictoriaMetrics/VictoriaMetrics/commit/b771152039d23b5ccd637a23ea748bc44a9511a7).
 1. Create the following release tags:
    * `git tag -s v1.xx.y` in `master` branch
@@ -121,6 +134,14 @@ and the candidate is deployed to the sandbox environment.
       * linux/ppc64le
       * linux/386
       This step can be run manually with the command `make publish` from the needed git tag.
+   * c) [SPDX](https://spdx.dev/) SBOM attestations are
+      generated automatically by BuildKit during
+      `docker buildx build` (`--sbom=true`). SBOMs can
+      be inspected with
+      `docker buildx imagetools inspect <image> --format "{{ json .SBOM }}"`
+      or consumed by vulnerability scanners such as
+      [Trivy](https://github.com/aquasecurity/trivy) via
+      `trivy image --sbom-sources oci <image-ref>`.
 
 1. Run `TAG=v1.xx.y make github-create-release github-upload-assets`. This command performs the following tasks:
 
@@ -138,7 +159,7 @@ and the candidate is deployed to the sandbox environment.
       * To run the command `TAG=v1.xx.y make github-create-release github-upload-assets`, so new release is created
         and all the needed assets are re-uploaded to it.
 
-1. Go to <https://github.com/VictoriaMetrics/VictoriaMetrics/releases> and verify that draft release with the name `TAG` has been created
+1. Run `TAG=v1.xx.y make github-verify-release` to verify that draft release with the name `TAG` has been created
    and this release contains all the needed binaries and checksums.
 1. Update the release description with the content of [CHANGELOG](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/master/docs/victoriametrics/changelog/CHANGELOG.md) for this release. **Use "Save Draft" button, do not publish the release yet!**.
 1. Follow the instructions in [LTS release](https://github.com/VictoriaMetrics/VictoriaMetrics-enterprise/blob/enterprise-single-node/Release-Guide.md#lts-release).
@@ -153,7 +174,7 @@ Issues included in the release are closed, with the comment.
 
 1. Review the performance of the release candidate in the sandbox environment.
    If any issues are found, they must be addressed, and the release process restarted from [Step 1](#step-1) with an incremented release candidate version.
-1. Run `TAG=v1.xx.y EXTRA_DOCKER_TAG_SUFFIX=-rc1 make publish-final-images`. This command publishes the final release images from release candidate image for given `EXTRA_DOCKER_TAG_SUFFIX` and updates  `latest` Docker image tag for the given `TAG`.
+1. Run `TAG=v1.xx.y EXTRA_DOCKER_TAG_SUFFIX=-rc1 make publish-final-images`. This command publishes the final release images from release candidate image for given `EXTRA_DOCKER_TAG_SUFFIX` and updates `latest` Docker image tag for the given `TAG`. SBOM attestations are preserved from the RC images by `imagetools create`.
    This command must be run only for the latest officially published release. It must be skipped when publishing other releases such as
    [LTS releases](https://docs.victoriametrics.com/victoriametrics/lts-releases/) or some test releases.
 1. Deploy the final images to the sandbox environment and perform a quick smoke test to verify basic functionality works.
@@ -185,6 +206,7 @@ Issues included in the release are closed, with the comment.
    ```
 
 1. Bump VictoriaMetrics version mentioned in [docs](https://github.com/VictoriaMetrics/VictoriaMetrics/issues/7388).
+1. Run `TAG=v1.xx.y make docs-update-flags` command to update command-line flags in the documentation. [Commit example](https://github.com/VictoriaMetrics/VictoriaMetrics/commit/4d42b291e55ac9211130efbd5a56aa819998516d).
 1. Follow the instructions in [release follow-up](https://github.com/VictoriaMetrics/VictoriaMetrics-enterprise/blob/enterprise-single-node/Release-Guide.md).
 
 #### Operator

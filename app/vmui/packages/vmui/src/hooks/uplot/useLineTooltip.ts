@@ -13,10 +13,9 @@ interface LineTooltipHook {
   metrics: MetricResult[];
   series: uPlotSeries[];
   unit?: string;
-  isAnomalyView?: boolean;
 }
 
-const useLineTooltip = ({ u, metrics, series, unit, isAnomalyView }: LineTooltipHook) => {
+const useLineTooltip = ({ u, metrics, series, unit }: LineTooltipHook) => {
   const [showTooltip, setShowTooltip] = useState(false);
   const [tooltipIdx, setTooltipIdx] = useState({ seriesIdx: -1, dataIdx: -1 });
   const [stickyTooltips, setStickyToolTips] = useState<ChartTooltipProps[]>([]);
@@ -49,6 +48,26 @@ const useLineTooltip = ({ u, metrics, series, unit, isAnomalyView }: LineTooltip
     const max = u?.scales?.[1]?.max || 1;
     const date = u?.data?.[0]?.[dataIdx] || 0;
 
+    let duplicateCount = 1;
+
+    if (u && seriesIdx > 0 && dataIdx >= 0) {
+      const xs = u.data[0] as (number | null)[];
+      const ys = u.data[seriesIdx] as (number | null)[];
+
+      const xVal = xs[dataIdx];
+      const yVal = ys[dataIdx];
+
+      if (xVal != null && yVal != null) {
+        duplicateCount = 0;
+
+        for (let i = 0; i < xs.length; i++) {
+          if (xs[i] === xVal && ys[i] === yVal) {
+            duplicateCount++;
+          }
+        }
+      }
+    }
+
     const point = {
       top: u ? u.valToPos((value || 0), seriesItem?.scale || "1") : 0,
       left: u ? u.valToPos(date, "x") : 0,
@@ -59,14 +78,15 @@ const useLineTooltip = ({ u, metrics, series, unit, isAnomalyView }: LineTooltip
       point,
       u: u,
       id: `${seriesIdx}_${dataIdx}`,
-      title: groups.size > 1 && !isAnomalyView ? `Query ${group}` : "",
+      title: groups.size > 1 ? `Query ${group}` : "",
       dates: [date ? dayjs(date * 1000).tz().format(DATE_FULL_TIMEZONE_FORMAT) : "-"],
       value: formatPrettyNumber(value, min, max),
       info: getMetricName(metricItem, seriesItem),
       statsFormatted: seriesItem?.statsFormatted,
       marker: `${seriesItem?.stroke}`,
+      duplicateCount,
     };
-  }, [u, tooltipIdx, metrics, series, unit, isAnomalyView]);
+  }, [u, tooltipIdx, metrics, series, unit]);
 
   const handleClick = useCallback(() => {
     if (!showTooltip) return;

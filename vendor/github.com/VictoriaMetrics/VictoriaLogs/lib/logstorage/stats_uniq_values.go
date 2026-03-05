@@ -179,7 +179,7 @@ func (sup *statsUniqValuesProcessor) importState(src []byte, stopCh <-chan struc
 
 	m := make(map[string]struct{}, itemsLen)
 	stateSize := 0
-	for i := uint64(0); i < itemsLen; i++ {
+	for range itemsLen {
 		v, n := encoding.UnmarshalBytes(src)
 		if n <= 0 {
 			return 0, fmt.Errorf("cannot unmarshal item")
@@ -233,11 +233,8 @@ func mergeSetsParallel(ms []map[string]struct{}, concurrency uint, stopCh <-chan
 
 	var wg sync.WaitGroup
 	msShards := make([][]map[string]struct{}, shardsLen)
-	for i := range msShards {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-
+	for idx := range msShards {
+		wg.Go(func() {
 			perCPU := make([]map[string]struct{}, cpusCount)
 			for i := range perCPU {
 				perCPU[i] = make(map[string]struct{})
@@ -253,16 +250,13 @@ func mergeSetsParallel(ms []map[string]struct{}, concurrency uint, stopCh <-chan
 			}
 
 			msShards[idx] = perCPU
-		}(i)
+		})
 	}
 	wg.Wait()
 
 	perCPUItems := make([][]string, cpusCount)
-	for i := range perCPUItems {
-		wg.Add(1)
-		go func(cpuIdx int) {
-			defer wg.Done()
-
+	for cpuIdx := range perCPUItems {
+		wg.Go(func() {
 			m := msShards[0][cpuIdx]
 			for _, perCPU := range msShards[1:] {
 				for s := range perCPU[cpuIdx] {
@@ -278,7 +272,7 @@ func mergeSetsParallel(ms []map[string]struct{}, concurrency uint, stopCh <-chan
 
 			items := setToSortedSlice(m)
 			perCPUItems[cpuIdx] = items
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -390,7 +384,21 @@ func marshalJSONArray(dst []byte, items []string) []byte {
 	return dst
 }
 
-func parseStatsUniqValues(lex *lexer) (*statsUniqValues, error) {
+func marshalJSONValues(dst []byte, items []string) []byte {
+	if len(items) == 0 {
+		return append(dst, "[]"...)
+	}
+	dst = append(dst, '[')
+	dst = append(dst, items[0]...)
+	for _, item := range items[1:] {
+		dst = append(dst, ',')
+		dst = append(dst, item...)
+	}
+	dst = append(dst, ']')
+	return dst
+}
+
+func parseStatsUniqValues(lex *lexer) (statsFunc, error) {
 	fieldFilters, err := parseStatsFuncFieldFilters(lex, "uniq_values")
 	if err != nil {
 		return nil, err
@@ -399,12 +407,10 @@ func parseStatsUniqValues(lex *lexer) (*statsUniqValues, error) {
 		fieldFilters: fieldFilters,
 	}
 	if lex.isKeyword("limit") {
-		lex.nextToken()
-		n, ok := tryParseUint64(lex.token)
-		if !ok {
-			return nil, fmt.Errorf("cannot parse 'limit %s' for 'uniq_values': %w", lex.token, err)
+		n, err := parseLimit(lex)
+		if err != nil {
+			return nil, err
 		}
-		lex.nextToken()
 		su.limit = n
 	}
 	return su, nil

@@ -33,13 +33,11 @@ func newListenerSwitch(ln net.Listener) *listenerSwitch {
 	}
 	ls.telnetConnsCh = make(chan net.Conn)
 	ls.httpConnsCh = make(chan net.Conn)
-	ls.wg.Add(1)
-	go func() {
+	ls.wg.Go(func() {
 		ls.worker()
 		close(ls.telnetConnsCh)
 		close(ls.httpConnsCh)
-		ls.wg.Done()
-	}()
+	})
 	return ls
 }
 
@@ -61,7 +59,8 @@ func (ls *listenerSwitch) stop() error {
 }
 
 func (ls *listenerSwitch) worker() {
-	var buf [1]byte
+	wg := sync.WaitGroup{}
+	defer wg.Wait()
 	for {
 		c, err := ls.ln.Accept()
 		if err != nil {
@@ -76,25 +75,42 @@ func (ls *listenerSwitch) worker() {
 			ls.closeLock.Unlock()
 			return
 		}
-		if _, err := io.ReadFull(c, buf[:]); err != nil {
-			logger.Errorf("listenerSwitch: cannot read one byte from the underlying connection for %q: %s", ls.ln.Addr(), err)
-			_ = c.Close()
-			continue
-		}
 
-		// It is expected that both listeners - http and telnet consume incoming connections as soon as possible,
-		// so the below code shouldn't block for extended periods of time.
-		pc := &peekedConn{
-			Conn:      c,
-			firstChar: buf[0],
-		}
-		if buf[0] == 'p' {
-			// Assume the request starts with `put`.
-			ls.telnetConnsCh <- pc
-		} else {
-			// Assume the request starts with `POST`.
-			ls.httpConnsCh <- pc
-		}
+		wg.Go(func() {
+			if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				logger.Errorf("listenerSwitch: cannot set read deadline for the underlying connection %q: %s", ls.ln.Addr(), err)
+				_ = c.Close()
+				return
+			}
+
+			// Block on reading the first byte. This determines the connection type and decides whether it goes to ls.telnetConnsCh or ls.httpConnsCh.
+			var buf [1]byte
+			if _, err := io.ReadFull(c, buf[:]); err != nil {
+				logger.Errorf("listenerSwitch: cannot read one byte from the underlying connection for %q: %s", ls.ln.Addr(), err)
+				_ = c.Close()
+				return
+			}
+
+			if err := c.SetReadDeadline(time.Time{}); err != nil {
+				logger.Errorf("listenerSwitch: cannot reset read deadline for the underlying connection %q: %s", ls.ln.Addr(), err)
+				_ = c.Close()
+				return
+			}
+
+			// It is expected that both listeners - http and telnet consume incoming connections as soon as possible,
+			// so the below code shouldn't block for extended periods of time.
+			pc := &peekedConn{
+				Conn:      c,
+				firstChar: buf[0],
+			}
+			if buf[0] == 'p' {
+				// Assume the request starts with `put`.
+				ls.telnetConnsCh <- pc
+			} else {
+				// Assume the request starts with `POST`.
+				ls.httpConnsCh <- pc
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	nethttputil "net/http/httputil"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -138,7 +139,9 @@ func main() {
 	if len(listenAddrs) == 0 {
 		listenAddrs = []string{":8481"}
 	}
-	go httpserver.Serve(listenAddrs, requestHandler, httpserver.ServeOptions{UseProxyProtocol: useProxyProtocol})
+	go httpserver.Serve(listenAddrs, requestHandler, httpserver.ServeOptions{
+		UseProxyProtocol: useProxyProtocol,
+	})
 
 	pushmetrics.Init()
 	sig := procutil.WaitForSigterm()
@@ -280,6 +283,13 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 	p, err := httpserver.ParsePath(path)
 	if err != nil {
 		httpserver.Errorf(w, r, "cannot parse path %q: %s", path, err)
+		return true
+	}
+	switch p.Prefix {
+	case "select":
+	case "delete":
+	default:
+		httpserver.Errorf(w, r, "unsupported URL format for path %q. Make sure you're using cluster URL format https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/#url-format.", path)
 		return true
 	}
 	at, err := auth.NewTokenPossibleMultitenant(p.AuthToken)
@@ -540,6 +550,14 @@ func selectHandler(qt *querytracer.Tracer, startTime time.Time, w http.ResponseW
 			httpserver.Errorf(w, r, "error in %q: %s", r.URL.Path, err)
 		}
 		return true
+	case "prometheus/api/v1/metadata":
+		metadataRequests.Inc()
+		if err := prometheus.MetadataHandler(qt, startTime, at, w, r); err != nil {
+			metadataErrors.Inc()
+			httpserver.SendPrometheusError(w, r, err)
+			return true
+		}
+		return true
 	default:
 		return false
 	}
@@ -582,6 +600,7 @@ func handleStaticAndSimpleRequests(w http.ResponseWriter, r *http.Request, path 
 		}
 		w.Header().Add("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, "<h2>VictoriaMetrics cluster - vmselect</h2></br>")
+		fmt.Fprintf(w, "Version %s<br>", buildinfo.Version)
 		fmt.Fprintf(w, "See <a href='https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/#url-format'>docs</a></br>")
 		fmt.Fprintf(w, "Useful endpoints:</br>")
 		fmt.Fprintf(w, `<a href="vmui">Web UI</a><br>`)
@@ -766,12 +785,6 @@ func handleStaticAndSimpleRequests(w http.ResponseWriter, r *http.Request, path 
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"success","data":{"notifiers":[]}}`)
 		return true
-	case "prometheus/api/v1/metadata":
-		// Return dumb placeholder for https://prometheus.io/docs/prometheus/latest/querying/api/#querying-metric-metadata
-		metadataRequests.Inc()
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "%s", `{"status":"success","data":{}}`)
-		return true
 	case "prometheus/api/v1/status/buildinfo":
 		buildInfoRequests.Inc()
 		w.Header().Set("Content-Type", "application/json")
@@ -870,6 +883,9 @@ var (
 	federateRequests = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/federate"}`)
 	federateErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/select/{}/prometheus/federate"}`)
 
+	metadataRequests = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/api/v1/metadata"}`)
+	metadataErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/select/{}/prometheus/api/v1/metadata"}`)
+
 	graphiteMetricsFindRequests = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/graphite/metrics/find"}`)
 	graphiteMetricsFindErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/select/{}/graphite/metrics/find"}`)
 
@@ -923,7 +939,6 @@ var (
 	rulesRequests     = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/api/v1/rules"}`)
 	alertsRequests    = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/api/v1/alerts"}`)
 
-	metadataRequests       = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/api/v1/metadata"}`)
 	buildInfoRequests      = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/api/v1/buildinfo"}`)
 	queryExemplarsRequests = metrics.NewCounter(`vm_http_requests_total{path="/select/{}/prometheus/api/v1/query_exemplars"}`)
 
@@ -960,9 +975,10 @@ func proxyVMAlertRequests(w http.ResponseWriter, r *http.Request, path string) {
 		// Forward other panics to the caller.
 		panic(err)
 	}()
-	r.URL.Path = strings.TrimPrefix(path, "prometheus")
-	r.Host = vmalertProxyHost
-	vmalertProxy.ServeHTTP(w, r)
+	req := r.Clone(r.Context())
+	req.URL.Path = strings.TrimPrefix(path, "prometheus")
+	req.Host = vmalertProxyHost
+	vmalertProxy.ServeHTTP(w, req)
 }
 
 var (
@@ -1027,10 +1043,5 @@ func checkDuplicates(arr []string) string {
 }
 
 func hasEmptyValues(arr []string) bool {
-	for _, s := range arr {
-		if s == "" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(arr, "")
 }

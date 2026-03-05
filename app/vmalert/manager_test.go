@@ -40,10 +40,11 @@ func TestManagerEmptyRulesDir(t *testing.T) {
 // execution of configuration update.
 // Should be executed with -race flag
 func TestManagerUpdateConcurrent(t *testing.T) {
+	_, cleanup := notifier.InitFakeNotifier()
+	defer cleanup()
 	m := &manager{
 		groups:         make(map[uint64]*rule.Group),
 		querierBuilder: &datasource.FakeQuerier{},
-		notifiers:      func() []notifier.Notifier { return []notifier.Notifier{&notifier.FakeNotifier{}} },
 	}
 	paths := []string{
 		"config/testdata/dir/rules0-good.rules",
@@ -64,13 +65,11 @@ func TestManagerUpdateConcurrent(t *testing.T) {
 
 	const workers = 500
 	const iterations = 10
-	wg := sync.WaitGroup{}
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go func(n int) {
-			defer wg.Done()
+	var wg sync.WaitGroup
+	for n := range workers {
+		wg.Go(func() {
 			r := rand.New(rand.NewSource(int64(n)))
-			for i := 0; i < iterations; i++ {
+			for range iterations {
 				rnd := r.Intn(len(paths))
 				cfg, err := config.Parse([]string{paths[rnd]}, notifier.ValidateTemplates, true)
 				if err != nil { // update can fail and this is expected
@@ -78,7 +77,7 @@ func TestManagerUpdateConcurrent(t *testing.T) {
 				}
 				_ = m.update(context.Background(), cfg, false)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 }
@@ -127,8 +126,9 @@ func TestManagerUpdate_Success(t *testing.T) {
 		m := &manager{
 			groups:         make(map[uint64]*rule.Group),
 			querierBuilder: &datasource.FakeQuerier{},
-			notifiers:      func() []notifier.Notifier { return []notifier.Notifier{&notifier.FakeNotifier{}} },
 		}
+		_, cleanup := notifier.InitFakeNotifier()
+		defer cleanup()
 
 		cfgInit := loadCfg(t, []string{initPath}, true, true)
 		if err := m.update(ctx, cfgInit, false); err != nil {
@@ -259,7 +259,7 @@ func compareGroups(t *testing.T, a, b *rule.Group) {
 	for i, r := range a.Rules {
 		got, want := r, b.Rules[i]
 		if a.CreateID() != b.CreateID() {
-			t.Fatalf("expected to have rule %q; got %q", want.ID(), got.ID())
+			t.Fatalf("expected to have rule %d; got %d", want.ID(), got.ID())
 		}
 		if err := rule.CompareRules(t, want, got); err != nil {
 			t.Fatalf("comparison error: %s", err)
@@ -277,7 +277,8 @@ func TestManagerUpdate_Failure(t *testing.T) {
 			rw:             rw,
 		}
 		if notifiers != nil {
-			m.notifiers = func() []notifier.Notifier { return notifiers }
+			_, cleanup := notifier.InitFakeNotifier()
+			defer cleanup()
 		}
 		err := m.update(context.Background(), []config.Group{cfg}, false)
 		if err == nil {

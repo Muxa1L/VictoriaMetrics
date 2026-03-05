@@ -324,7 +324,7 @@ func unmarshalColumnHeadersRefsInplace(dst []columnHeaderRef, src []byte) ([]col
 	}
 	src = src[nSize:]
 
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		columnNameID, nSize := encoding.UnmarshalVarUint64(src)
 		if nSize <= 0 {
 			return dst, srcOrig, fmt.Errorf("cannot unmarshal column name ID number %d out of %d", i, n)
@@ -398,7 +398,7 @@ func (csh *columnsHeader) resizeColumnHeaders(n int) []columnHeader {
 
 func (csh *columnsHeader) setColumnNames(cshIndex *columnsHeaderIndex, columnNames []string) error {
 	if len(cshIndex.columnHeadersRefs) != len(csh.columnHeaders) {
-		return fmt.Errorf("unpexected number of column headers; got %d; want %d", len(cshIndex.columnHeadersRefs), len(csh.columnHeaders))
+		return fmt.Errorf("unexpected number of column headers; got %d; want %d", len(cshIndex.columnHeadersRefs), len(csh.columnHeaders))
 	}
 	for i := range csh.columnHeaders {
 		columnNameID := cshIndex.columnHeadersRefs[i].columnNameID
@@ -959,7 +959,7 @@ type timestampsHeader struct {
 	// blockSize is the size of the timestamps block inside timestampsFilename file
 	blockSize uint64
 
-	// minTimestamp is the mimumum timestamp seen in the block in nanoseconds
+	// minTimestamp is the minimum timestamp seen in the block in nanoseconds
 	minTimestamp int64
 
 	// maxTimestamp is the maximum timestamp seen in the block in nanoseconds
@@ -984,6 +984,13 @@ func (th *timestampsHeader) copyFrom(src *timestampsHeader) {
 	th.minTimestamp = src.minTimestamp
 	th.maxTimestamp = src.maxTimestamp
 	th.marshalType = src.marshalType
+}
+
+func (th *timestampsHeader) subTimeOffset(timeOffset int64) {
+	if timeOffset != 0 {
+		th.minTimestamp = SubInt64NoOverflow(th.minTimestamp, timeOffset)
+		th.maxTimestamp = SubInt64NoOverflow(th.maxTimestamp, timeOffset)
+	}
 }
 
 // marshal appends marshaled th to dst and returns the result.

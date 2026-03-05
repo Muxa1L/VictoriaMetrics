@@ -23,9 +23,17 @@ Use `-kafka.consumer.topic.defaultFormat` or `-kafka.consumer.topic.format` comm
   and [OpenMetrics format](https://github.com/OpenObservability/OpenMetrics/blob/master/specification/OpenMetrics.md).
 * `graphite` - [Graphite plaintext format](https://graphite.readthedocs.io/en/latest/feeding-carbon.html#the-plaintext-protocol).
 * `jsonline` - [JSON line format](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-import-data-in-json-line-format).
+* `opentelemetry`{{% available_from "v1.128.0" %}}  - [Opentelemetry format](https://docs.victoriametrics.com/victoriametrics/integrations/opentelemetry/)
 
 For Kafka messages in the `promremotewrite` format, `vmagent` will automatically detect whether they are using [the Prometheus remote write protocol](https://prometheus.io/docs/specs/remote_write_spec/#protocol)
 or [the VictoriaMetrics remote write protocol](https://docs.victoriametrics.com/victoriametrics/vmagent/#victoriametrics-remote-write-protocol), and handle them accordingly.
+
+By default, `vmagent` will perform time-based manual commit, which manually commits kafka messages in batches at one-second intervals.
+Unlike Kafka's auto commit, which updates the ready-to-commit offset upon receiving the message, time-based manual commit will update the ready-to-commit offset after the message has been delivered to `vmagent`'s send buffer.
+This provides stronger guarantees than auto commit, and reduces the risk of data loss during crashes/restarts.
+
+We recommend using the default time-based manual commit. However, if you strongly desire to use kafka's auto commit for some reason, you can pass flag `-kafka.consumer.topic.options='enable.auto.commit'` to `vmagent`, in this scenario
+kafka client will automatically commit offset based on value of `auto.commit.interval.ms=5000` (5s by default).
 
 Every Kafka message may contain multiple lines in `influx`, `prometheus`, `graphite` and `jsonline` format delimited by `\n`.
 
@@ -101,7 +109,7 @@ See also [how to write metrics to multiple distinct tenants](https://docs.victor
   -kafka.consumer.topic.defaultFormat string
         Expected data format in the topic if -kafka.consumer.topic.format is skipped. See https://docs.victoriametrics.com/victoriametrics/integrations/kafka/#reading-metrics . This flag is available only in Enterprise binaries. See https://docs.victoriametrics.com/victoriametrics/enterprise/ (default "promremotewrite")
   -kafka.consumer.topic.format array
-        data format for corresponding kafka topic. Valid formats: influx, prometheus, promremotewrite, graphite, jsonline . See https://docs.victoriametrics.com/victoriametrics/integrations/kafka/#reading-metrics . This flag is available only in Enterprise binaries. See https://docs.victoriametrics.com/victoriametrics/enterprise/
+        data format for corresponding kafka topic. Valid formats: influx, prometheus, promremotewrite, graphite, jsonline and opentelemetry. See https://docs.victoriametrics.com/victoriametrics/integrations/kafka/#reading-metrics . This flag is available only in Enterprise binaries. See https://docs.victoriametrics.com/victoriametrics/enterprise/
         Supports an array of values separated by comma or specified via multiple flags.
   -kafka.consumer.topic.groupID array
         Defines group.id for topic. See https://docs.victoriametrics.com/victoriametrics/integrations/kafka/#reading-metrics . This flag is available only in Enterprise binaries. See https://docs.victoriametrics.com/victoriametrics/enterprise/

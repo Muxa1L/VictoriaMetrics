@@ -92,6 +92,7 @@ export interface TopQuery {
   query: string;
   timeRangeSeconds: number;
   sumDurationSeconds: number;
+  avgMemoryBytes: number;
   timeRange: string;
   url?: string;
 }
@@ -107,6 +108,7 @@ export interface TopQueriesData extends TopQueryStats {
   topByAvgDuration: TopQuery[];
   topByCount: TopQuery[];
   topBySumDuration: TopQuery[];
+  topByAvgMemoryUsage: TopQuery[];
   error?: string;
 }
 
@@ -192,7 +194,7 @@ export interface Group {
   rules: Rule[];
   interval: number;
   limit: number;
-  lastEvaluation: number;
+  lastEvaluation: string;
   evaluationTime: number;
   type: string;
   id: string;
@@ -216,7 +218,7 @@ export interface Rule {
   annotations: Record<string, string>;
   alerts: Alert[];
   health: string;
-  lastEvaluation: number;
+  lastEvaluation: string;
   lastError: string;
   evaluationTime: number;
   type: string;
@@ -247,7 +249,7 @@ export interface Alert {
   expression: string;
   labels: Record<string, string>;
   annotations: Record<string, string>;
-  activeAt: number;
+  activeAt: string;
   id: string;
   source: string;
   restored: boolean;

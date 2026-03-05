@@ -51,21 +51,34 @@ func (fr *filterRegexp) initTokens() {
 }
 
 func skipFirstLastToken(s string) string {
+	s = skipFirstToken(s)
+	s = skipLastToken(s)
+	return s
+}
+
+func skipFirstToken(s string) string {
 	for {
 		r, runeSize := utf8.DecodeRuneInString(s)
 		if !isTokenRune(r) {
-			break
+			return s
 		}
 		s = s[runeSize:]
 	}
+}
+
+func skipLastToken(s string) string {
 	for {
 		r, runeSize := utf8.DecodeLastRuneInString(s)
 		if !isTokenRune(r) {
-			break
+			return s
 		}
 		s = s[:len(s)-runeSize]
 	}
-	return s
+}
+
+func (fr *filterRegexp) matchRow(fields []Field) bool {
+	v := getFieldValueByName(fields, fr.fieldName)
+	return fr.re.MatchString(v)
 }
 
 func (fr *filterRegexp) applyToBlockResult(br *blockResult, bm *bitmap) {

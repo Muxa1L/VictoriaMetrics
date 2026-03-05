@@ -54,6 +54,11 @@ func (fp *filterPhrase) initTokens() {
 	fp.tokensHashes = appendTokensHashes(nil, fp.tokens)
 }
 
+func (fp *filterPhrase) matchRow(fields []Field) bool {
+	v := getFieldValueByName(fields, fp.fieldName)
+	return matchPhrase(v, fp.phrase)
+}
+
 func (fp *filterPhrase) applyToBlockResult(br *blockResult, bm *bitmap) {
 	applyToBlockResultGeneric(br, bm, fp.fieldName, fp.phrase, matchPhrase)
 }
@@ -141,7 +146,7 @@ func matchIPv4ByPhrase(bs *blockSearch, ch *columnHeader, bm *bitmap, phrase str
 	}
 
 	// Slow path - the phrase may contain a part of IP address. For example, `1.23` should match `1.23.4.5` and `4.1.23.54`.
-	// We cannot compare binary represetnation of ip address and need converting
+	// We cannot compare binary representation of ip address and need converting
 	// the ip to string before searching for prefix there.
 	if !matchBloomFilterAllTokens(bs, ch, tokens) {
 		bm.resetBits()

@@ -17,7 +17,7 @@ import (
 // pipeFacetsDefaultLimit is the default number of entries pipeFacets returns per each log field.
 const pipeFacetsDefaultLimit = 10
 
-// pipeFacetsDefaulatMaxValuesPerField is the default number of unique values to track per each field.
+// pipeFacetsDefaultMaxValuesPerField is the default number of unique values to track per each field.
 const pipeFacetsDefaultMaxValuesPerField = 1000
 
 // pipeFacetsDefaultMaxValueLen is the default length of values in fields, which must be ignored when building facets.
@@ -63,7 +63,13 @@ func (pf *pipeFacets) splitToRemoteAndLocal(timestamp int64) (pipe, []pipe) {
 	pRemote := *pf
 	pRemote.limit = math.MaxUint64
 
-	psLocalStr := fmt.Sprintf("stats by (field_name, field_value) sum(hits) as hits | sort by (hits desc) limit %d partition by (field_name) | sort by (field_name, hits desc)", pf.limit)
+	psLocalStr := fmt.Sprintf(`stats by (field_name, field_value) sum(hits) as hits
+	        | total_stats by (field_name) count() as field_values_count
+		| filter field_values_count:<=%d
+		| delete field_values_count
+		| sort by (hits desc) limit %d partition by (field_name)
+		| sort by (field_name, hits desc, field_value)
+		| fields field_name, field_value, hits`, pf.maxValuesPerField, pf.limit)
 	psLocal := mustParsePipes(psLocalStr, timestamp)
 
 	return &pRemote, psLocal
@@ -71,6 +77,14 @@ func (pf *pipeFacets) splitToRemoteAndLocal(timestamp int64) (pipe, []pipe) {
 
 func (pf *pipeFacets) canLiveTail() bool {
 	return false
+}
+
+func (pf *pipeFacets) canReturnLastNResults() bool {
+	return false
+}
+
+func (pf *pipeFacets) isFixedOutputFieldsOrder() bool {
+	return true
 }
 
 func (pf *pipeFacets) updateNeededFields(f *prefixfilter.Filter) {
@@ -212,7 +226,7 @@ func (shard *pipeFacetsProcessorShard) updateFacetsForColumn(br *blockResult, c 
 			shard.updateStateInt64(fhs, n)
 		}
 	default:
-		for i := 0; i < br.rowsLen; i++ {
+		for i := range br.rowsLen {
 			v := c.getValueAtRow(br, i)
 			shard.updateStateGeneric(fhs, v, 1)
 		}
@@ -347,6 +361,7 @@ func (pfp *pipeFacetsProcessor) flush() error {
 		return nil
 	}
 
+	ignoreFields := make(map[string]bool)
 	hmasByFieldName := make(map[string][]*hitsMapAdaptive)
 	rowsTotal := uint64(0)
 	for _, shard := range shards {
@@ -354,7 +369,12 @@ func (pfp *pipeFacetsProcessor) flush() error {
 			return nil
 		}
 		for fieldName, fhs := range shard.m {
+			if ignoreFields[fieldName] {
+				continue
+			}
 			if fhs.mustIgnore {
+				ignoreFields[fieldName] = true
+				delete(hmasByFieldName, fieldName)
 				continue
 			}
 			hmasByFieldName[fieldName] = append(hmasByFieldName[fieldName], &fhs.m)

@@ -79,6 +79,17 @@ func (pm *pipeMath) canLiveTail() bool {
 	return true
 }
 
+func (pm *pipeMath) canReturnLastNResults() bool {
+	// TODO: if math clobbers _time field, then it may impossible returning lastN results.
+	// TODO: properly verify this case.
+
+	return true
+}
+
+func (pm *pipeMath) isFixedOutputFieldsOrder() bool {
+	return false
+}
+
 func (me *mathEntry) String() string {
 	s := me.expr.String()
 	if isMathBinaryOp(me.expr.op) {
@@ -304,7 +315,7 @@ func (shard *pipeMathProcessorShard) executeExpr(me *mathExpr, br *blockResult) 
 
 	if me.isConst {
 		r := shard.rs[rIdx]
-		for i := 0; i < br.rowsLen; i++ {
+		for i := range br.rowsLen {
 			r[i] = me.constValue
 		}
 		return
@@ -795,7 +806,7 @@ func parseMathExprConstNumber(lex *lexer) (*mathExpr, error) {
 	if !isNumberPrefix(lex.token) {
 		return nil, fmt.Errorf("cannot parse number from %q", lex.token)
 	}
-	numStr, err := getCompoundMathToken(lex)
+	numStr, err := lex.nextCompoundMathToken()
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse number: %w", err)
 	}
@@ -812,7 +823,7 @@ func parseMathExprConstNumber(lex *lexer) (*mathExpr, error) {
 }
 
 func parseMathExprFieldName(lex *lexer) (*mathExpr, error) {
-	fieldName, err := getCompoundMathToken(lex)
+	fieldName, err := lex.nextCompoundMathToken()
 	if err != nil {
 		return nil, err
 	}
@@ -821,30 +832,6 @@ func parseMathExprFieldName(lex *lexer) (*mathExpr, error) {
 		fieldName: fieldName,
 	}
 	return me, nil
-}
-
-func getCompoundMathToken(lex *lexer) (string, error) {
-	if err := lex.isInvalidQuotedString(); err != nil {
-		return "", err
-	}
-
-	stopTokens := []string{"=", "+", "-", "*", "/", "%", "^", ",", ")", "|", "!", ""}
-	if lex.isKeyword(stopTokens...) {
-		return "", fmt.Errorf("compound token cannot start with '%s'", lex.token)
-	}
-
-	s := lex.token
-	rawS := lex.rawToken
-	lex.nextToken()
-	suffix := ""
-	for !lex.isSkippedSpace && !lex.isKeyword(stopTokens...) && !lex.isEnd() {
-		suffix += lex.rawToken
-		lex.nextToken()
-	}
-	if suffix == "" {
-		return s, nil
-	}
-	return rawS + suffix, nil
 }
 
 func mathFuncAnd(result []float64, args [][]float64) {
@@ -925,7 +912,11 @@ func mathFuncMod(result []float64, args [][]float64) {
 		yInt := int64(y)
 		if float64(xInt) == x && float64(yInt) == y {
 			// Fast path - integer modulo
-			result[i] = float64(xInt % yInt)
+			if yInt == 0 {
+				result[i] = nan
+			} else {
+				result[i] = float64(xInt % yInt)
+			}
 		} else {
 			// Slow path - floating point modulo
 			result[i] = math.Mod(x, y)

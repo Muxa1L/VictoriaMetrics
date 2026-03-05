@@ -51,9 +51,9 @@ func benchmarkAggregatorsPush(b *testing.B, output string) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchSeries) * loops))
 	b.RunParallel(func(pb *testing.PB) {
-		var matchIdxs []byte
+		var matchIdxs []uint32
 		for pb.Next() {
-			for i := 0; i < loops; i++ {
+			for range loops {
 				matchIdxs = a.Push(benchSeries, matchIdxs)
 			}
 		}
@@ -65,13 +65,13 @@ func newBenchAggregators(outputs []string, pushFunc PushFunc) *Aggregators {
 	for i := range outputs {
 		outputsQuoted[i] = stringsutil.JSONString(outputs[i])
 	}
+
 	config := fmt.Sprintf(`
 - match: http_requests_total
   interval: 24h
   by: [job]
   outputs: [%s]
 `, strings.Join(outputsQuoted, ","))
-
 	a, err := LoadFromData([]byte(config), pushFunc, nil, "some_alias")
 	if err != nil {
 		panic(fmt.Errorf("unexpected error when initializing aggregators: %s", err))
@@ -81,7 +81,7 @@ func newBenchAggregators(outputs []string, pushFunc PushFunc) *Aggregators {
 
 func newBenchSeries(seriesCount int) []prompb.TimeSeries {
 	a := make([]string, 0, seriesCount)
-	for j := 0; j < seriesCount; j++ {
+	for j := range seriesCount {
 		s := fmt.Sprintf(`http_requests_total{path="/foo/%d",job="foo_%d",instance="bar",pod="pod-123232312",namespace="kube-foo-bar",node="node-123-3434-443",`+
 			`some_other_label="foo-bar-baz",environment="prod",label1="value1",label2="value2",label3="value3"} %d`, j, j%100, j*1000)
 		a = append(a, s)
@@ -94,3 +94,46 @@ func newBenchSeries(seriesCount int) []prompb.TimeSeries {
 const seriesCount = 10_000
 
 var benchSeries = newBenchSeries(seriesCount)
+
+func BenchmarkConcurrentAggregatorsPush(b *testing.B) {
+	pushFunc := func(_ []prompb.TimeSeries) {}
+
+	a := newPerOutputBenchAggregators(benchOutputs, pushFunc)
+	defer a.MustStop()
+
+	const loops = 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(benchSeries) * loops))
+	b.RunParallel(func(pb *testing.PB) {
+		var matchIdxs []uint32
+		for pb.Next() {
+			for range loops {
+				matchIdxs = a.Push(benchSeries, matchIdxs)
+			}
+		}
+	})
+}
+
+func newPerOutputBenchAggregators(outputs []string, pushFunc PushFunc) *Aggregators {
+	outputsQuoted := make([]string, len(outputs))
+	var config string
+	for i := range outputs {
+		outputsQuoted[i] = stringsutil.JSONString(outputs[i])
+		cfg := fmt.Sprintf(`
+- match: http_requests_total
+  interval: 24h
+  by: [job]
+  outputs: [%s]
+`, stringsutil.JSONString(outputs[i]))
+		config += cfg
+
+	}
+
+	a, err := LoadFromData([]byte(config), pushFunc, nil, "some_alias")
+	if err != nil {
+		panic(fmt.Errorf("unexpected error when initializing aggregators: %s", err))
+	}
+	return a
+}

@@ -663,7 +663,7 @@ func TestAlertingRuleExecRange(t *testing.T) {
 			Name:        "for-pending",
 			Type:        config.NewPrometheusType().String(),
 			Labels:      map[string]string{"alertname": "for-pending"},
-			Annotations: map[string]string{"activeAt": "5000"},
+			Annotations: map[string]string{},
 			State:       notifier.StatePending,
 			ActiveAt:    time.Unix(5, 0),
 			Value:       1,
@@ -683,7 +683,7 @@ func TestAlertingRuleExecRange(t *testing.T) {
 			Name:        "for-firing",
 			Type:        config.NewPrometheusType().String(),
 			Labels:      map[string]string{"alertname": "for-firing"},
-			Annotations: map[string]string{"activeAt": "1000"},
+			Annotations: map[string]string{},
 			State:       notifier.StateFiring,
 			ActiveAt:    time.Unix(1, 0),
 			Start:       time.Unix(5, 0),
@@ -704,7 +704,7 @@ func TestAlertingRuleExecRange(t *testing.T) {
 			Name:        "for-hold-pending",
 			Type:        config.NewPrometheusType().String(),
 			Labels:      map[string]string{"alertname": "for-hold-pending"},
-			Annotations: map[string]string{"activeAt": "5000"},
+			Annotations: map[string]string{},
 			State:       notifier.StatePending,
 			ActiveAt:    time.Unix(5, 0),
 			Value:       1,
@@ -826,12 +826,9 @@ func TestGroup_Restore(t *testing.T) {
 		fg := NewGroup(config.Group{Name: "TestRestore", Rules: rules}, fqr, time.Second, nil)
 		fg.Init()
 		wg := sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			nts := func() []notifier.Notifier { return []notifier.Notifier{&notifier.FakeNotifier{}} }
-			fg.Start(context.Background(), nts, nil, fqr)
-			wg.Done()
-		}()
+		wg.Go(func() {
+			fg.Start(context.Background(), nil, fqr)
+		})
 		fg.Close()
 		wg.Wait()
 
@@ -1122,7 +1119,7 @@ func TestAlertingRuleLimit_Success(t *testing.T) {
 }
 
 func TestAlertingRule_Template(t *testing.T) {
-	f := func(rule *AlertingRule, metrics []datasource.Metric, alertsExpected map[uint64]*notifier.Alert) {
+	f := func(rule *AlertingRule, metrics []datasource.Metric, isResponsePartial bool, alertsExpected map[uint64]*notifier.Alert) {
 		t.Helper()
 
 		fakeGroup := Group{
@@ -1135,6 +1132,7 @@ func TestAlertingRule_Template(t *testing.T) {
 			entries: make([]StateEntry, 10),
 		}
 		fq.Add(metrics...)
+		fq.SetPartialResponse(isResponsePartial)
 
 		if _, err := rule.exec(context.TODO(), time.Now(), 0); err != nil {
 			t.Fatalf("unexpected error: %s", err)
@@ -1165,7 +1163,7 @@ func TestAlertingRule_Template(t *testing.T) {
 	}, []datasource.Metric{
 		metricWithValueAndLabels(t, 1, "instance", "foo"),
 		metricWithValueAndLabels(t, 1, "instance", "bar"),
-	}, map[uint64]*notifier.Alert{
+	}, false, map[uint64]*notifier.Alert{
 		hash(map[string]string{alertNameLabel: "common", "region": "east", "instance": "foo"}): {
 			Annotations: map[string]string{
 				"summary": `common: Too high connection number for "foo"`,
@@ -1194,14 +1192,14 @@ func TestAlertingRule_Template(t *testing.T) {
 			"instance": "{{ $labels.instance }}",
 		},
 		Annotations: map[string]string{
-			"summary":     `{{ $labels.__name__ }}: Too high connection number for "{{ $labels.instance }}"`,
+			"summary":     `{{ $labels.__name__ }}: Too high connection number for "{{ $labels.instance }}".{{ if $isPartial }} WARNING: Partial response detected - this alert may be incomplete. Please verify the results manually.{{ end }}`,
 			"description": `{{ $labels.alertname}}: It is {{ $value }} connections for "{{ $labels.instance }}"`,
 		},
 		alerts: make(map[uint64]*notifier.Alert),
 	}, []datasource.Metric{
 		metricWithValueAndLabels(t, 2, "__name__", "first", "instance", "foo", alertNameLabel, "override"),
 		metricWithValueAndLabels(t, 10, "__name__", "second", "instance", "bar", alertNameLabel, "override"),
-	}, map[uint64]*notifier.Alert{
+	}, false, map[uint64]*notifier.Alert{
 		hash(map[string]string{alertNameLabel: "override label", "exported_alertname": "override", "instance": "foo"}): {
 			Labels: map[string]string{
 				alertNameLabel:       "override label",
@@ -1209,7 +1207,7 @@ func TestAlertingRule_Template(t *testing.T) {
 				"instance":           "foo",
 			},
 			Annotations: map[string]string{
-				"summary":     `first: Too high connection number for "foo"`,
+				"summary":     `first: Too high connection number for "foo".`,
 				"description": `override: It is 2 connections for "foo"`,
 			},
 		},
@@ -1220,7 +1218,7 @@ func TestAlertingRule_Template(t *testing.T) {
 				"instance":           "bar",
 			},
 			Annotations: map[string]string{
-				"summary":     `second: Too high connection number for "bar"`,
+				"summary":     `second: Too high connection number for "bar".`,
 				"description": `override: It is 10 connections for "bar"`,
 			},
 		},
@@ -1233,7 +1231,7 @@ func TestAlertingRule_Template(t *testing.T) {
 			"instance": "{{ $labels.instance }}",
 		},
 		Annotations: map[string]string{
-			"summary": `Alert "{{ $labels.alertname }}({{ $labels.alertgroup }})" for instance {{ $labels.instance }}`,
+			"summary": `Alert "{{ $labels.alertname }}({{ $labels.alertgroup }})" for instance {{ $labels.instance }}.{{ if $isPartial }} WARNING: Partial response detected - this alert may be incomplete. Please verify the results manually.{{ end }}`,
 		},
 		alerts: make(map[uint64]*notifier.Alert),
 	}, []datasource.Metric{
@@ -1241,7 +1239,7 @@ func TestAlertingRule_Template(t *testing.T) {
 			alertNameLabel, "originAlertname",
 			alertGroupNameLabel, "originGroupname",
 			"instance", "foo"),
-	}, map[uint64]*notifier.Alert{
+	}, true, map[uint64]*notifier.Alert{
 		hash(map[string]string{
 			alertNameLabel:        "OriginLabels",
 			"exported_alertname":  "originAlertname",
@@ -1257,7 +1255,7 @@ func TestAlertingRule_Template(t *testing.T) {
 				"instance":            "foo",
 			},
 			Annotations: map[string]string{
-				"summary": `Alert "originAlertname(originGroupname)" for instance foo`,
+				"summary": `Alert "originAlertname(originGroupname)" for instance foo. WARNING: Partial response detected - this alert may be incomplete. Please verify the results manually.`,
 			},
 		},
 	})
@@ -1372,8 +1370,10 @@ func TestAlertingRule_ToLabels(t *testing.T) {
 
 	ar := &AlertingRule{
 		Labels: map[string]string{
-			"instance": "override", // this should override instance with new value
-			"group":    "vmalert",  // this shouldn't have effect since value in metric is equal
+			"instance":      "override", // this should override instance with new value
+			"group":         "vmalert",  // this shouldn't have effect since value in metric is equal
+			"invalid_label": "{{ .Values.mustRuntimeFail }}",
+			"empty_label":   "", // this should be dropped
 		},
 		Expr:      "sum(vmalert_alerting_rules_error) by(instance, group, alertname) > 0",
 		Name:      "AlertingRulesError",
@@ -1381,10 +1381,11 @@ func TestAlertingRule_ToLabels(t *testing.T) {
 	}
 
 	expectedOriginLabels := map[string]string{
-		"instance":   "0.0.0.0:8800",
-		"group":      "vmalert",
-		"alertname":  "ConfigurationReloadFailure",
-		"alertgroup": "vmalert",
+		"instance":      "0.0.0.0:8800",
+		"group":         "vmalert",
+		"alertname":     "ConfigurationReloadFailure",
+		"alertgroup":    "vmalert",
+		"invalid_label": `error evaluating template: template: :1:298: executing "" at <.Values.mustRuntimeFail>: can't evaluate field Values in type notifier.tplData`,
 	}
 
 	expectedProcessedLabels := map[string]string{
@@ -1394,11 +1395,12 @@ func TestAlertingRule_ToLabels(t *testing.T) {
 		"exported_alertname": "ConfigurationReloadFailure",
 		"group":              "vmalert",
 		"alertgroup":         "vmalert",
+		"invalid_label":      `error evaluating template: template: :1:298: executing "" at <.Values.mustRuntimeFail>: can't evaluate field Values in type notifier.tplData`,
 	}
 
 	ls, err := ar.toLabels(metric, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err)
+	if err == nil || !strings.Contains(err.Error(), "error evaluating template") {
+		t.Fatalf("unexpected error %q", err.Error())
 	}
 
 	if !reflect.DeepEqual(ls.origin, expectedOriginLabels) {
@@ -1427,5 +1429,52 @@ func TestAlertingRuleExec_Partial(t *testing.T) {
 	_, err := ar.exec(context.TODO(), ts, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
+func TestAlertingRule_QueryTemplateInLabels(t *testing.T) {
+	fq := &datasource.FakeQuerier{}
+	fakeGroup := Group{
+		Name: "TestQueryTemplateInLabels",
+	}
+
+	ar := &AlertingRule{
+		Name: "test_alert",
+		Labels: map[string]string{
+			"suppress_for_mass_alert": `{{ if (printf "ALERTS{alertname='SomeAlert', alertstate='firing', device='%s'} == 1" $labels.device | query) }}true{{ else }}false{{ end }}`,
+		},
+		Annotations: map[string]string{
+			"summary": "Test alert with query template in labels",
+		},
+		alerts: make(map[uint64]*notifier.Alert),
+	}
+	ar.GroupID = fakeGroup.GetID()
+	ar.q = fq
+	ar.state = &ruleState{
+		entries: make([]StateEntry, 10),
+	}
+
+	// Add a metric that should trigger the alert
+	fq.Add(metricWithValueAndLabels(t, 1, "device", "sda1"))
+
+	ts := time.Now()
+	_, err := ar.exec(context.TODO(), ts, 0)
+	if err != nil {
+		t.Fatalf("unexpected error with query template in labels: %s", err)
+	}
+
+	// Verify that the alert was created and the query template was executed
+	if len(ar.alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(ar.alerts))
+	}
+
+	alert := ar.GetAlerts()[0]
+	suppressLabel, exists := alert.Labels["suppress_for_mass_alert"]
+	if !exists {
+		t.Fatalf("expected 'suppress_for_mass_alert' label to exist")
+	}
+	// The query template should have been executed (even if it returns false due to mock data)
+	if suppressLabel != "true" && suppressLabel != "false" {
+		t.Fatalf("expected 'suppress_for_mass_alert' label to be 'true' or 'false', got '%s'", suppressLabel)
 	}
 }

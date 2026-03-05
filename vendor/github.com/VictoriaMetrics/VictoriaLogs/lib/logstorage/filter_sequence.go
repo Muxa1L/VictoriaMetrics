@@ -70,6 +70,12 @@ func (fs *filterSequence) initNonEmptyPhrases() {
 	fs.nonEmptyPhrases = result
 }
 
+func (fs *filterSequence) matchRow(fields []Field) bool {
+	phrases := fs.getNonEmptyPhrases()
+	v := getFieldValueByName(fields, fs.fieldName)
+	return matchSequence(v, phrases)
+}
+
 func (fs *filterSequence) applyToBlockResult(br *blockResult, bm *bitmap) {
 	phrases := fs.getNonEmptyPhrases()
 	if len(phrases) == 0 {
@@ -166,7 +172,7 @@ func matchIPv4BySequence(bs *blockSearch, ch *columnHeader, bm *bitmap, phrases 
 	}
 
 	// Slow path - phrases contain parts of IP address. For example, `1.23` should match `1.23.4.5` and `4.1.23.54`.
-	// We cannot compare binary represetnation of ip address and need converting
+	// We cannot compare binary representation of ip address and need converting
 	// the ip to string before searching for prefix there.
 	bb := bbPool.Get()
 	visitValues(bs, ch, bm, func(v string) bool {

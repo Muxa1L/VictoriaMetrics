@@ -80,7 +80,7 @@ func InitRollupResultCache(cachePath string) {
 		c = workingsetcache.New(cacheSize)
 		rollupResultCacheKeyPrefix.Store(newRollupResultCacheKeyPrefix())
 	}
-	if *disableCache {
+	if *disableCache && len(rollupResultCachePath) > 0 && !*resetRollupResultCacheOnStartup {
 		c.Reset()
 	}
 
@@ -126,42 +126,41 @@ func InitRollupResultCache(cachePath string) {
 
 	rollupResultCacheV = &rollupResultCache{
 		c: c,
+
+		rollupResultCacheRequests:    metrics.GetOrCreateCounter(`vm_rollup_result_cache_requests_total`),
+		rollupResultCacheFullHits:    metrics.GetOrCreateCounter(`vm_rollup_result_cache_full_hits_total`),
+		rollupResultCachePartialHits: metrics.GetOrCreateCounter(`vm_rollup_result_cache_partial_hits_total`),
+		rollupResultCacheMisses:      metrics.GetOrCreateCounter(`vm_rollup_result_cache_miss_total`),
+		rollupResultCacheResets:      metrics.GetOrCreateCounter(`vm_rollup_result_cache_resets_total`),
 	}
 }
 
 // StopRollupResultCache closes the rollupResult cache.
 func StopRollupResultCache() {
-	if len(rollupResultCachePath) == 0 {
-		rollupResultCacheV.c.Stop()
-		rollupResultCacheV.c = nil
-		return
+	if rollupResultCachePath != "" {
+		rollupResultCacheV.c.MustSave(rollupResultCachePath)
+		mustSaveRollupResultCacheKeyPrefix(rollupResultCachePath)
 	}
-	logger.Infof("saving rollupResult cache to %q...", rollupResultCachePath)
-	startTime := time.Now()
-	if err := rollupResultCacheV.c.Save(rollupResultCachePath); err != nil {
-		logger.Errorf("cannot save rollupResult cache at %q: %s", rollupResultCachePath, err)
-		return
-	}
-	mustSaveRollupResultCacheKeyPrefix(rollupResultCachePath)
-	var fcs fastcache.Stats
-	rollupResultCacheV.c.UpdateStats(&fcs)
 	rollupResultCacheV.c.Stop()
 	rollupResultCacheV.c = nil
-	logger.Infof("saved rollupResult cache to %q in %.3f seconds; entriesCount: %d, sizeBytes: %d",
-		rollupResultCachePath, time.Since(startTime).Seconds(), fcs.EntriesCount, fcs.BytesSize)
 }
 
 // TODO: convert this cache to distributed cache shared among vmselect
 // instances in the cluster.
 type rollupResultCache struct {
 	c *workingsetcache.Cache
-}
 
-var rollupResultCacheResets = metrics.NewCounter(`vm_cache_resets_total{type="promql/rollupResult"}`)
+	rollupResultCacheRequests    *metrics.Counter
+	rollupResultCacheFullHits    *metrics.Counter
+	rollupResultCachePartialHits *metrics.Counter
+	rollupResultCacheMisses      *metrics.Counter
+
+	rollupResultCacheResets *metrics.Counter
+}
 
 // ResetRollupResultCache resets rollup result cache.
 func ResetRollupResultCache() {
-	rollupResultCacheResets.Inc()
+	rollupResultCacheV.rollupResultCacheResets.Inc()
 	rollupResultCacheKeyPrefix.Add(1)
 	logger.Infof("rollupResult cache has been cleared")
 }
@@ -700,7 +699,7 @@ func (mi *rollupResultCacheMetainfo) Unmarshal(src []byte) error {
 	entriesLen := int(encoding.UnmarshalUint32(src))
 	src = src[4:]
 	mi.entries = slicesutil.SetLength(mi.entries, entriesLen)
-	for i := 0; i < entriesLen; i++ {
+	for i := range entriesLen {
 		tail, err := mi.entries[i].Unmarshal(src)
 		if err != nil {
 			return fmt.Errorf("cannot unmarshal entry #%d: %w", i, err)

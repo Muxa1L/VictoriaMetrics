@@ -33,6 +33,14 @@ func (ps *pipeSample) canLiveTail() bool {
 	return true
 }
 
+func (ps *pipeSample) canReturnLastNResults() bool {
+	return false
+}
+
+func (ps *pipeSample) isFixedOutputFieldsOrder() bool {
+	return false
+}
+
 func (ps *pipeSample) updateNeededFields(_ *prefixfilter.Filter) {
 	// nothing to do
 }
@@ -133,11 +141,16 @@ func parsePipeSample(lex *lexer) (pipe, error) {
 	}
 	lex.nextToken()
 
-	sample, err := parseUint(lex.token)
+	sampleStr, err := lex.nextCompoundToken()
 	if err != nil {
-		return nil, fmt.Errorf("cannot parse sample from %q: %w", lex.token, err)
+		return nil, fmt.Errorf("cannot read 'sample': %w", err)
 	}
-	lex.nextToken()
+
+	sample, err := parseUint(sampleStr)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse sample from %q: %w", sampleStr, err)
+	}
+
 	if sample <= 0 {
 		return nil, fmt.Errorf("unexpected sample=%d; it must be bigger than 0", sample)
 	}

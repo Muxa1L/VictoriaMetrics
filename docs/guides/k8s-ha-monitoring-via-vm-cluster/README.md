@@ -23,7 +23,7 @@ sitemap:
 
 ## 1. VictoriaMetrics Helm repository
 
-Please see the relevant [VictoriaMetrics Helm repository](https://docs.victoriametrics.com/guides/k8s-monitoring-via-vm-cluster#1-victoriametrics-helm-repository) section in previous guides. 
+Please see the relevant [VictoriaMetrics Helm repository](https://docs.victoriametrics.com/guides/k8s-monitoring-via-vm-cluster/#1-victoriametrics-helm-repository) section in previous guides. 
 
 
 ## 2. Install VictoriaMetrics Cluster from the Helm chart
@@ -187,12 +187,6 @@ scrape_configs:
       relabel_configs:
         - action: labelmap
           regex: __meta_kubernetes_node_label_(.+)
-        - target_label: __address__
-          replacement: kubernetes.default.svc:443
-        - source_labels: [__meta_kubernetes_node_name]
-          regex: (.+)
-          target_label: __metrics_path__
-          replacement: /api/v1/nodes/$1/proxy/metrics
     - job_name: "kubernetes-nodes-cadvisor"
       scheme: https
       tls_config:
@@ -201,15 +195,12 @@ scrape_configs:
       bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
       kubernetes_sd_configs:
         - role: node
+      metrics_path: /metrics/cadvisor
       relabel_configs:
         - action: labelmap
           regex: __meta_kubernetes_node_label_(.+)
-        - target_label: __address__
-          replacement: kubernetes.default.svc:443
-        - source_labels: [__meta_kubernetes_node_name]
-          regex: (.+)
-          target_label: __metrics_path__
-          replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+        - source_labels: [__metrics_path__]
+          target_label: metrics_path
       metric_relabel_configs:
         - action: replace
           source_labels: [pod]
@@ -353,7 +344,7 @@ The expected output is:
 The expected result of the query `count(up{kubernetes_pod_name=~".*vmselect.*"})` should be equal to `3` - the number of replicas we set via `replicaCount` parameter.
 
 
-To test via Grafana, we need to install it first. [Install and connect Grafana to VictoriaMetrics](https://docs.victoriametrics.com/guides/k8s-monitoring-via-vm-cluster#4-install-and-connect-grafana-to-victoriametrics-with-helm), login into Grafana and open the metrics explore page at `http://127.0.0.1:3000/explore`.
+To test via Grafana, we need to install it first. [Install and connect Grafana to VictoriaMetrics](https://docs.victoriametrics.com/guides/k8s-monitoring-via-vm-cluster/#4-install-and-connect-grafana-to-victoriametrics-with-helm), login into Grafana and open the metrics explore page at `http://127.0.0.1:3000/explore`.
 
 
 ![Explore](explore.webp)

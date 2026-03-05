@@ -43,17 +43,13 @@ var (
 // DateRange returns the date range for the given time range.
 func (tr *TimeRange) DateRange() (uint64, uint64) {
 	minDate := uint64(tr.MinTimestamp) / msecPerDay
-	// Max timestamp may point to the first millisecond of the next day. As the
-	// result, the returned date range will cover one more day than needed.
-	// Decrementing by 1 removes this extra day.
-	maxDate := uint64(tr.MaxTimestamp-1) / msecPerDay
 
+	// Sample at Max timestamp should be included because `End` is inclusive.
+	// According to https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
 	// However, if both timestamps are the same and point to the beginning of
 	// the day, then maxDate will be smaller that the minDate. In this case
 	// maxDate is set to minDate.
-	if maxDate < minDate {
-		maxDate = minDate
-	}
+	maxDate := max(uint64(tr.MaxTimestamp)/msecPerDay, minDate)
 
 	return minDate, maxDate
 }
@@ -104,6 +100,18 @@ func (tr *TimeRange) fromPartitionTime(t time.Time) {
 	tr.MaxTimestamp = maxTime.Unix()*1e3 - 1
 }
 
-const msecPerDay = 24 * 3600 * 1000
+// overlapsWith returns true if the time range overlaps with the given time
+// range.
+func (tr *TimeRange) overlapsWith(v TimeRange) bool {
+	return tr.MinTimestamp <= v.MaxTimestamp && tr.MaxTimestamp >= v.MinTimestamp
+}
 
-const msecPerHour = 3600 * 1000
+// contains returns true if the time range contains the given timestamp.
+func (tr *TimeRange) contains(timestamp int64) bool {
+	return tr.MinTimestamp <= timestamp && timestamp <= tr.MaxTimestamp
+}
+
+const (
+	msecPerDay  = 24 * 3600 * 1000
+	msecPerHour = 3600 * 1000
+)

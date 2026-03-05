@@ -80,14 +80,15 @@ func (as AlertState) String() string {
 
 // AlertTplData is used to execute templating
 type AlertTplData struct {
-	Type     string
-	Labels   map[string]string
-	Value    float64
-	Expr     string
-	AlertID  uint64
-	GroupID  uint64
-	ActiveAt time.Time
-	For      time.Duration
+	Type      string
+	Labels    map[string]string
+	Value     float64
+	Expr      string
+	AlertID   uint64
+	GroupID   uint64
+	ActiveAt  time.Time
+	For       time.Duration
+	IsPartial bool
 }
 
 var tplHeaders = []string{
@@ -101,6 +102,7 @@ var tplHeaders = []string{
 	"{{ $groupID := .GroupID }}",
 	"{{ $activeAt := .ActiveAt }}",
 	"{{ $for := .For }}",
+	"{{ $isPartial := .IsPartial }}",
 }
 
 // ExecTemplate executes the Alert template for given
@@ -166,8 +168,8 @@ func templateAnnotations(annotations map[string]string, data AlertTplData, tmpl 
 		ctmpl, _ := tmpl.Clone()
 		ctmpl = ctmpl.Option("missingkey=zero")
 		if err := templateAnnotation(&buf, builder.String(), tData, ctmpl, execute); err != nil {
-			r[key] = text
-			eg.Add(fmt.Errorf("key %q, template %q: %w", key, text, err))
+			r[key] = err.Error()
+			eg.Add(fmt.Errorf("(key: %q, value: %q): %w", key, text, err))
 			continue
 		}
 		r[key] = buf.String()
@@ -184,13 +186,13 @@ type tplData struct {
 func templateAnnotation(dst io.Writer, text string, data tplData, tpl *textTpl.Template, execute bool) error {
 	tpl, err := tpl.Parse(text)
 	if err != nil {
-		return fmt.Errorf("error parsing annotation template: %w", err)
+		return fmt.Errorf("error parsing template: %w", err)
 	}
 	if !execute {
 		return nil
 	}
 	if err = tpl.Execute(dst, data); err != nil {
-		return fmt.Errorf("error evaluating annotation template: %w", err)
+		return fmt.Errorf("error evaluating template: %w", err)
 	}
 	return nil
 }

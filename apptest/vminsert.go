@@ -11,6 +11,7 @@ import (
 
 	"github.com/golang/snappy"
 
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prommetadata"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
 )
 
@@ -58,10 +59,11 @@ func StartVminsert(instance string, flags []string, cli *Client, output io.Write
 
 	app, stderrExtracts, err := startApp(instance, "../../bin/vminsert", flags, &appOptions{
 		defaultFlags: map[string]string{
-			"-httpListenAddr":          "127.0.0.1:0",
-			"-clusternativeListenAddr": "127.0.0.1:0",
-			"-graphiteListenAddr":      ":0",
-			"-opentsdbListenAddr":      "127.0.0.1:0",
+			"-httpListenAddr":                              "127.0.0.1:0",
+			"-clusternativeListenAddr":                     "127.0.0.1:0",
+			"-graphiteListenAddr":                          ":0",
+			"-opentsdbListenAddr":                          "127.0.0.1:0",
+			"-clusternative.vminsertConnsShutdownDuration": "1ms",
 		},
 		extractREs: extractREs,
 		output:     output,
@@ -200,13 +202,16 @@ func (app *Vminsert) OpenTSDBAPIPut(t *testing.T, records []string, opts QueryOp
 // PrometheusAPIV1Write is a test helper function that inserts a
 // collection of records in Prometheus remote-write format by sending a HTTP
 // POST request to /prometheus/api/v1/write vminsert endpoint.
-func (app *Vminsert) PrometheusAPIV1Write(t *testing.T, records []prompb.TimeSeries, opts QueryOpts) {
+func (app *Vminsert) PrometheusAPIV1Write(t *testing.T, wr prompb.WriteRequest, opts QueryOpts) {
 	t.Helper()
 
 	url := fmt.Sprintf("http://%s/insert/%s/prometheus/api/v1/write", app.httpListenAddr, opts.getTenant())
-	wr := prompb.WriteRequest{Timeseries: records}
 	data := snappy.Encode(nil, wr.MarshalProtobuf(nil))
-	app.sendBlocking(t, len(records), func() {
+	recordsCount := len(wr.Timeseries)
+	if prommetadata.IsEnabled() {
+		recordsCount += len(wr.Metadata)
+	}
+	app.sendBlocking(t, recordsCount, func() {
 		_, statusCode := app.cli.Post(t, url, "application/x-protobuf", data)
 		if statusCode != http.StatusNoContent {
 			t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusNoContent)
@@ -230,12 +235,60 @@ func (app *Vminsert) PrometheusAPIV1ImportPrometheus(t *testing.T, records []str
 		url += "?" + uvs
 	}
 	data := []byte(strings.Join(records, "\n"))
-	app.sendBlocking(t, len(records), func() {
+	var recordsCount int
+	var metadataRecords int
+	uniqueMetadataMetricNames := make(map[string]struct{})
+	for _, record := range records {
+		// metric metadata has the following format:
+		//# HELP importprometheus_series
+		//# TYPE importprometheus_series
+		// it results into single metadata record
+		if strings.HasPrefix(record, "# ") {
+			metadataItems := strings.Split(record, " ")
+			if len(metadataItems) < 2 {
+				t.Fatalf("BUG: unexpected metadata format=%q", record)
+			}
+			metricName := metadataItems[2]
+			if _, ok := uniqueMetadataMetricNames[metricName]; ok {
+				continue
+			}
+			uniqueMetadataMetricNames[metricName] = struct{}{}
+			metadataRecords++
+			continue
+		}
+		recordsCount++
+	}
+	if prommetadata.IsEnabled() {
+		recordsCount += metadataRecords
+	}
+	app.sendBlocking(t, recordsCount, func() {
 		_, statusCode := app.cli.Post(t, url, "text/plain", data)
 		if statusCode != http.StatusNoContent {
 			t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusNoContent)
 		}
 	})
+}
+
+// ZabbixConnectorHistory is a test helper function that inserts a
+// collection of records in zabbixconnector  format by sending a HTTP
+// POST request to /zabbixconnector/api/v1/history vmsingle endpoint.
+func (app *Vminsert) ZabbixConnectorHistory(t *testing.T, records []string, opts QueryOpts) {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s/insert/%s/zabbixconnector/api/v1/history", app.httpListenAddr, opts.getTenant())
+	uv := opts.asURLValues()
+	uvs := uv.Encode()
+	if len(uvs) > 0 {
+		url += "?" + uvs
+	}
+	data := []byte(strings.Join(records, "\n"))
+	app.sendBlocking(t, len(records), func() {
+		_, statusCode := app.cli.Post(t, url, "application/json", data)
+		if statusCode != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusOK)
+		}
+	})
+
 }
 
 // String returns the string representation of the vminsert app state.
@@ -259,15 +312,17 @@ func (app *Vminsert) String() string {
 func (app *Vminsert) sendBlocking(t *testing.T, numRecordsToSend int, send func()) {
 	t.Helper()
 
+	wantRowsSentCount := app.rpcRowsSentTotal(t) + numRecordsToSend
+
 	send()
 
 	const (
 		retries = 20
 		period  = 100 * time.Millisecond
 	)
-	wantRowsSentCount := app.rpcRowsSentTotal(t) + numRecordsToSend
 	for range retries {
-		if app.rpcRowsSentTotal(t) >= wantRowsSentCount {
+		d := app.rpcRowsSentTotal(t)
+		if d >= wantRowsSentCount {
 			return
 		}
 		time.Sleep(period)

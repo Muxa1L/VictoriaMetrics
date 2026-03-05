@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"testing"
 )
 
@@ -186,6 +187,20 @@ func (app *Vmselect) PrometheusAPIV1LabelValues(t *testing.T, labelName, matchQu
 	return NewPrometheusAPIV1LabelValuesResponse(t, res)
 }
 
+// PrometheusAPIV1Metadata sends a query to a /prometheus/api/v1/metadata endpoint
+// and returns the results.
+func (app *Vmselect) PrometheusAPIV1Metadata(t *testing.T, metric string, limit int, opts QueryOpts) *PrometheusAPIV1Metadata {
+	t.Helper()
+
+	values := opts.asURLValues()
+	values.Add("metric", metric)
+	values.Add("limit", strconv.Itoa(limit))
+	queryURL := fmt.Sprintf("http://%s/select/%s/prometheus/api/v1/metadata", app.httpListenAddr, opts.getTenant())
+
+	res, _ := app.cli.PostForm(t, queryURL, values)
+	return NewPrometheusAPIV1Metadata(t, res)
+}
+
 // APIV1AdminTSDBDeleteSeries deletes the series that match the query by sending
 // a request to /api/v1/admin/tsdb/delete_series.
 //
@@ -290,6 +305,43 @@ func (app *Vmselect) GraphiteMetricsIndex(t *testing.T, opts QueryOpts) Graphite
 		t.Fatalf("could not unmarshal metrics index response data:\n%s\n err: %v", res, err)
 	}
 	return index
+}
+
+// GraphiteTagsTagSeries is a test helper function that registers Graphite tags
+// for a single time series by sending a HTTP POST request to
+// /graphite/tags/tagSeries vmsingle endpoint.
+func (app *Vmselect) GraphiteTagsTagSeries(t *testing.T, record string, opts QueryOpts) string {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s/select/%s/graphite/tags/tagSeries", app.httpListenAddr, opts.getTenant())
+	values := opts.asURLValues()
+	values.Add("path", record)
+
+	res, statusCode := app.cli.PostForm(t, url, values)
+	if statusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d, want %d; response body: %q", statusCode, http.StatusOK, res)
+	}
+	return res
+}
+
+func (app *Vmselect) GraphiteTagsTagMultiSeries(t *testing.T, records []string, opts QueryOpts) []string {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s/select/%s/graphite/tags/tagMultiSeries", app.httpListenAddr, opts.getTenant())
+	values := opts.asURLValues()
+	for _, rec := range records {
+		values.Add("path", rec)
+	}
+
+	res, statusCode := app.cli.PostForm(t, url, values)
+	if statusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusOK)
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(res), &tags); err != nil {
+		t.Fatalf("could not unmarshal response:\n%s\n err: %v", res, err)
+	}
+	return tags
 }
 
 // APIV1AdminTenants sends a query to a /admin/tenants endpoint

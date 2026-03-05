@@ -39,6 +39,14 @@ func (pf *pipeFieldNames) canLiveTail() bool {
 	return false
 }
 
+func (pf *pipeFieldNames) canReturnLastNResults() bool {
+	return false
+}
+
+func (pf *pipeFieldNames) isFixedOutputFieldsOrder() bool {
+	return true
+}
+
 func (pf *pipeFieldNames) updateNeededFields(f *prefixfilter.Filter) {
 	if pf.isFirstPipe {
 		f.Reset()

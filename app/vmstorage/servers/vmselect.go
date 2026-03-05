@@ -14,6 +14,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/memory"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/querytracer"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage/metricsmetadata"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/vmselectapi"
 )
 
@@ -237,15 +238,22 @@ func (api *vmstorageAPI) setupTfss(qt *querytracer.Tracer, sq *storage.SearchQue
 	return tfss, nil
 }
 
+func (api *vmstorageAPI) GetMetadataRecords(qt *querytracer.Tracer, tt *storage.TenantToken, limit int, metricName string, deadline uint64) ([]*metricsmetadata.Row, error) {
+	return api.s.GetMetadataRows(qt, tt, limit, metricName, deadline)
+}
+
 // blockIterator implements vmselectapi.BlockIterator
 type blockIterator struct {
 	sr storage.Search
+	mb storage.MetricBlock
 }
 
 var blockIteratorsPool sync.Pool
 
 func (bi *blockIterator) MustClose() {
 	bi.sr.MustClose()
+	bi.mb.MetricName = nil
+	bi.mb.Block.Reset()
 	blockIteratorsPool.Put(bi)
 }
 
@@ -257,13 +265,15 @@ func getBlockIterator() *blockIterator {
 	return v.(*blockIterator)
 }
 
-func (bi *blockIterator) NextBlock(mb *storage.MetricBlock) bool {
+func (bi *blockIterator) NextBlock(dst []byte) ([]byte, bool) {
 	if !bi.sr.NextMetricBlock() {
-		return false
+		return dst, false
 	}
-	mb.MetricName = append(mb.MetricName[:0], bi.sr.MetricBlockRef.MetricName...)
+	mb := bi.mb
+	mb.MetricName = bi.sr.MetricBlockRef.MetricName
 	bi.sr.MetricBlockRef.BlockRef.MustReadBlock(&mb.Block)
-	return true
+	dst = mb.Marshal(dst[:0])
+	return dst, true
 }
 
 func (bi *blockIterator) Error() error {

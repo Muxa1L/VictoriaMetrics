@@ -27,6 +27,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmagent/promremotewrite"
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmagent/remotewrite"
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmagent/vmimport"
+	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmagent/zabbixconnector"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/auth"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/buildinfo"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
@@ -74,7 +75,7 @@ var (
 		"See also -opentsdbHTTPListenAddr.useProxyProtocol")
 	opentsdbHTTPUseProxyProtocol = flag.Bool("opentsdbHTTPListenAddr.useProxyProtocol", false, "Whether to use proxy protocol for connections accepted "+
 		"at -opentsdbHTTPListenAddr . See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt")
-	configAuthKey = flagutil.NewPassword("configAuthKey", "Authorization key for accessing /config page. It must be passed via authKey query arg. It overrides -httpAuth.*")
+	configAuthKey = flagutil.NewPassword("configAuthKey", "Authorization key for accessing /config and /remotewrite-.*-config pages. It must be passed via authKey query arg. It overrides -httpAuth.*")
 	reloadAuthKey = flagutil.NewPassword("reloadAuthKey", "Auth key for /-/reload http endpoint. It must be passed via authKey query arg. It overrides -httpAuth.*")
 	dryRun        = flag.Bool("dryRun", false, "Whether to check config files without running vmagent. The following files are checked: "+
 		"-promscrape.config, -remoteWrite.relabelConfig, -remoteWrite.urlRelabelConfig, -remoteWrite.streamAggr.config . "+
@@ -244,6 +245,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 		}
 		w.Header().Add("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, "<h2>vmagent</h2>")
+		fmt.Fprintf(w, "Version %s<br>", buildinfo.Version)
 		fmt.Fprintf(w, "See docs at <a href='https://docs.victoriametrics.com/victoriametrics/vmagent/'>https://docs.victoriametrics.com/victoriametrics/vmagent/</a></br>")
 		fmt.Fprintf(w, "Useful endpoints:</br>")
 		httpserver.WriteAPIHelp(w, [][2]string{
@@ -252,6 +254,8 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 			{"metric-relabel-debug", "debug metric relabeling"},
 			{"api/v1/targets", "advanced information about discovered targets in JSON format"},
 			{"config", "-promscrape.config contents"},
+			{"remotewrite-relabel-config", "-remoteWrite.relabelConfig contents"},
+			{"remotewrite-url-relabel-config", "-remoteWrite.urlRelabelConfig contents"},
 			{"metrics", "available service metrics"},
 			{"flags", "command-line flags"},
 			{"-/reload", "reload configuration"},
@@ -347,6 +351,17 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		firehose.WriteSuccessResponse(w, r)
+		return true
+	case "/zabbixconnector/api/v1/history":
+		zabbixconnectorHistoryRequests.Inc()
+		if err := zabbixconnector.InsertHandlerForHTTP(nil, r); err != nil {
+			zabbixconnectorHistoryErrors.Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":%q}`, err.Error())
+			return true
+		}
+		w.WriteHeader(http.StatusOK)
 		return true
 	case "/newrelic":
 		newrelicCheckRequest.Inc()
@@ -475,6 +490,42 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 		w.Header().Set("Content-Type", "application/json")
 		var bb bytesutil.ByteBuffer
 		promscrape.WriteConfigData(&bb)
+		fmt.Fprintf(w, `{"status":"success","data":{"yaml":%s}}`, stringsutil.JSONString(string(bb.B)))
+		return true
+	case "/remotewrite-relabel-config":
+		if !httpserver.CheckAuthFlag(w, r, configAuthKey) {
+			return true
+		}
+		remoteWriteRelabelConfigRequests.Inc()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		remotewrite.WriteRelabelConfigData(w)
+		return true
+	case "/api/v1/status/remotewrite-relabel-config":
+		if !httpserver.CheckAuthFlag(w, r, configAuthKey) {
+			return true
+		}
+		remoteWriteStatusRelabelConfigRequests.Inc()
+		w.Header().Set("Content-Type", "application/json")
+		var bb bytesutil.ByteBuffer
+		remotewrite.WriteRelabelConfigData(&bb)
+		fmt.Fprintf(w, `{"status":"success","data":{"yaml":%s}}`, stringsutil.JSONString(string(bb.B)))
+		return true
+	case "/remotewrite-url-relabel-config":
+		if !httpserver.CheckAuthFlag(w, r, configAuthKey) {
+			return true
+		}
+		remoteWriteURLRelabelConfigRequests.Inc()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		remotewrite.WriteURLRelabelConfigData(w)
+		return true
+	case "/api/v1/status/remotewrite-url-relabel-config":
+		if !httpserver.CheckAuthFlag(w, r, configAuthKey) {
+			return true
+		}
+		remoteWriteStatusURLRelabelConfigRequests.Inc()
+		w.Header().Set("Content-Type", "application/json")
+		var bb bytesutil.ByteBuffer
+		remotewrite.WriteURLRelabelConfigData(&bb)
 		fmt.Fprintf(w, `{"status":"success","data":{"yaml":%s}}`, stringsutil.JSONString(string(bb.B)))
 		return true
 	case "/prometheus/-/reload", "/-/reload":
@@ -606,6 +657,17 @@ func processMultitenantRequest(w http.ResponseWriter, r *http.Request, path stri
 		}
 		firehose.WriteSuccessResponse(w, r)
 		return true
+	case "zabbixconnector/api/v1/history":
+		zabbixconnectorHistoryRequests.Inc()
+		if err := zabbixconnector.InsertHandlerForHTTP(at, r); err != nil {
+			zabbixconnectorHistoryErrors.Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":%q}`, err.Error())
+			return true
+		}
+		w.WriteHeader(http.StatusOK)
+		return true
 	case "newrelic":
 		newrelicCheckRequest.Inc()
 		w.Header().Set("Content-Type", "application/json")
@@ -727,6 +789,9 @@ var (
 	opentelemetryPushRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"}`)
 	opentelemetryPushErrors   = metrics.NewCounter(`vmagent_http_request_errors_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"}`)
 
+	zabbixconnectorHistoryRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/zabbixconnector/api/v1/history", protocol="zabbixconnector"}`)
+	zabbixconnectorHistoryErrors   = metrics.NewCounter(`vmagent_http_request_errors_total{path="/zabbixconnector/api/v1/history", protocol="zabbixconnector"}`)
+
 	newrelicWriteRequests = metrics.NewCounter(`vm_http_requests_total{path="/newrelic/infra/v2/metrics/events/bulk", protocol="newrelic"}`)
 	newrelicWriteErrors   = metrics.NewCounter(`vm_http_request_errors_total{path="/newrelic/infra/v2/metrics/events/bulk", protocol="newrelic"}`)
 
@@ -746,6 +811,12 @@ var (
 
 	promscrapeConfigRequests       = metrics.NewCounter(`vmagent_http_requests_total{path="/config"}`)
 	promscrapeStatusConfigRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/api/v1/status/config"}`)
+
+	remoteWriteRelabelConfigRequests       = metrics.NewCounter(`vmagent_http_requests_total{path="/remotewrite-relabel-config"}`)
+	remoteWriteStatusRelabelConfigRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/api/v1/status/remotewrite-relabel-config"}`)
+
+	remoteWriteURLRelabelConfigRequests       = metrics.NewCounter(`vmagent_http_requests_total{path="/remotewrite-url-relabel-config"}`)
+	remoteWriteStatusURLRelabelConfigRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/api/v1/status/remotewrite-url-relabel-config"}`)
 
 	promscrapeConfigReloadRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/-/reload"}`)
 )

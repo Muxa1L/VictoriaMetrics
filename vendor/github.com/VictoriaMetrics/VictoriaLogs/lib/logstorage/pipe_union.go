@@ -37,6 +37,14 @@ func (pu *pipeUnion) canLiveTail() bool {
 	return false
 }
 
+func (pu *pipeUnion) canReturnLastNResults() bool {
+	return false
+}
+
+func (pu *pipeUnion) isFixedOutputFieldsOrder() bool {
+	return false
+}
+
 func (pu *pipeUnion) hasFilterInWithQuery() bool {
 	// The pu.q query with possible in(...) filters is processed independently at pu.flush(), so return false here.
 	return false
@@ -92,7 +100,7 @@ func parsePipeUnion(lex *lexer) (pipe, error) {
 
 	q, err := parseQueryInParens(lex)
 	if err != nil {
-		return nil, fmt.Errorf("cannot parse union(...): %w", err)
+		return nil, err
 	}
 
 	pu := &pipeUnion{

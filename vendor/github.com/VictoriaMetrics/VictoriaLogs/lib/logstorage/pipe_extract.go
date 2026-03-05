@@ -51,6 +51,16 @@ func (pe *pipeExtract) canLiveTail() bool {
 	return true
 }
 
+func (pe *pipeExtract) canReturnLastNResults() bool {
+	// TODO: properly verify that the extracted fields do not overwrite the _time field with non-timestamp values.
+
+	return true
+}
+
+func (pe *pipeExtract) isFixedOutputFieldsOrder() bool {
+	return false
+}
+
 func (pe *pipeExtract) hasFilterInWithQuery() bool {
 	return pe.iff.hasFilterInWithQuery()
 }
@@ -70,13 +80,6 @@ func (pe *pipeExtract) visitSubqueries(visitFunc func(q *Query)) {
 }
 
 func (pe *pipeExtract) updateNeededFields(pf *prefixfilter.Filter) {
-	if pf.MatchNothing() {
-		if pe.iff != nil {
-			pf.AddAllowFilters(pe.iff.allowFilters)
-		}
-		return
-	}
-
 	pfOrig := pf.Clone()
 	needFromField := false
 	for _, step := range pe.ptn.steps {
@@ -232,7 +235,7 @@ func parsePipeExtract(lex *lexer) (pipe, error) {
 	}
 
 	// parse pattern
-	patternStr, err := getCompoundToken(lex)
+	patternStr, err := lex.nextCompoundToken()
 	if err != nil {
 		return nil, fmt.Errorf("cannot read 'pattern': %w", err)
 	}

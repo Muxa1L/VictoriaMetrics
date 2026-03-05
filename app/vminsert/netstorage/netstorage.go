@@ -4,18 +4,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
+	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
-	"github.com/cespare/xxhash/v2"
 
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/consistenthash"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/consts"
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/handshake"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
@@ -24,11 +22,12 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/timerpool"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/timeutil"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/vminsertapi"
 )
 
 var (
-	disableRPCCompression = flag.Bool("rpc.disableCompression", false, "Whether to disable compression for the data sent from vminsert to vmstorage. This reduces CPU usage at the cost of higher network bandwidth usage")
-	replicationFactor     = flag.Int("replicationFactor", 1, "Replication factor for the ingested data, i.e. how many copies to make among distinct -storageNode instances. "+
+	disableCompression = flag.Bool("rpc.disableCompression", false, "Flag is deprecated and kept for backward compatibility, vminsert performs per block compression instead of streaming compression on RPC connection")
+	replicationFactor  = flag.Int("replicationFactor", 1, "Replication factor for the ingested data, i.e. how many copies to make among distinct -storageNode instances. "+
 		"Note that vmselect must run with -dedup.minScrapeInterval=1ms for data de-duplication when replicationFactor is greater than 1. "+
 		"Higher values for -dedup.minScrapeInterval at vmselect is OK")
 	disableRerouting      = flag.Bool("disableRerouting", true, "Whether to disable re-routing when some of vmstorage nodes accept incoming data at slower speed compared to other storage nodes. Disabled re-routing limits the ingestion rate by the slowest vmstorage node. On the other side, disabled re-routing minimizes the number of active time series in the cluster during rolling restarts and during spikes in series churn rate. See also -disableReroutingOnUnavailable and -dropSamplesOnOverload")
@@ -46,7 +45,7 @@ var (
 		"See also -disableRerouting")
 )
 
-var errStorageReadOnly = errors.New("storage node is read only")
+const unsupportedRPCRetrySeconds = 120
 
 func (sn *storageNode) isReady() bool {
 	return !sn.isBroken.Load() && !sn.isReadOnly.Load()
@@ -62,7 +61,7 @@ func (sn *storageNode) isReady() bool {
 // if sn is currently unavailable or overloaded.
 //
 // rows must match the number of rows in the buf.
-func (sn *storageNode) push(snb *storageNodesBucket, buf []byte, rows int) error {
+func (sn *storageNode) push(snb *storageNodesBucket, buf []byte, rows int, getRowHasher func() rowHasher) error {
 	if len(buf) > maxBufSizePerStorageNode {
 		logger.Panicf("BUG: len(buf)=%d cannot exceed %d", len(buf), maxBufSizePerStorageNode)
 	}
@@ -71,14 +70,14 @@ func (sn *storageNode) push(snb *storageNodesBucket, buf []byte, rows int) error
 		// Fast path - the buffer is successfully sent to sn.
 		return nil
 	}
-	if *dropSamplesOnOverload && !sn.isReadOnly.Load() {
+	if sn.dropRowsOnOverload && !sn.isReadOnly.Load() {
 		sn.rowsDroppedOnOverload.Add(rows)
-		dropSamplesOnOverloadLogger.Warnf("some rows dropped, because -dropSamplesOnOverload is set and vmstorage %s cannot accept new rows now. "+
+		dropSamplesOnOverloadLogger.Warnf("some rows are dropped, because -dropSamplesOnOverload is set and vmstorage %s cannot accept new rows now. "+
 			"See vm_rpc_rows_dropped_on_overload_total metric at /metrics page", sn.dialer.Addr())
 		return nil
 	}
 	// Slow path - sn cannot accept buf now, so re-route it to other vmstorage nodes.
-	if err := sn.rerouteBufToOtherStorageNodes(snb, buf, rows); err != nil {
+	if err := sn.rerouteBufToOtherStorageNodes(snb, buf, rows, getRowHasher); err != nil {
 		return fmt.Errorf("error when re-routing rows from %s: %w", sn.dialer.Addr(), err)
 	}
 	return nil
@@ -86,7 +85,7 @@ func (sn *storageNode) push(snb *storageNodesBucket, buf []byte, rows int) error
 
 var dropSamplesOnOverloadLogger = logger.WithThrottler("droppedSamplesOnOverload", 5*time.Second)
 
-func (sn *storageNode) rerouteBufToOtherStorageNodes(snb *storageNodesBucket, buf []byte, rows int) error {
+func (sn *storageNode) rerouteBufToOtherStorageNodes(snb *storageNodesBucket, buf []byte, rows int, getRowHasher func() rowHasher) error {
 	sns := snb.sns
 	sn.brLock.Lock()
 again:
@@ -104,14 +103,14 @@ again:
 			goto again
 		}
 		if *disableReroutingOnUnavailable {
-			// We should not send timeseries from currently unavailable storage to alive storage nodes.
+			// We should not send rows from currently unavailable storage to alive storage nodes.
 			sn.brCond.Wait()
 			goto again
 		}
 		sn.brLock.Unlock()
 
 		// The vmstorage node isn't ready for data processing. Re-route buf to healthy vmstorage nodes even if disableRerouting is set.
-		rowsProcessed, err := rerouteRowsToReadyStorageNodes(snb, sn, buf)
+		rowsProcessed, err := rerouteRowsToReadyStorageNodes(snb, sn, buf, getRowHasher)
 		rows -= rowsProcessed
 		if err != nil {
 			return fmt.Errorf("%d rows dropped because the current vsmtorage is unavailable and %w", rows, err)
@@ -127,12 +126,13 @@ again:
 		return nil
 	}
 	// Slow path: the buf contents doesn't fit sn.buf, so try re-routing it to other vmstorage nodes.
-	if *disableRerouting || len(sns) == 1 {
+	if !allowRerouting(sn, sns) {
 		sn.brCond.Wait()
 		goto again
 	}
+
 	sn.brLock.Unlock()
-	rowsProcessed, err := rerouteRowsToFreeStorageNodes(snb, sn, buf)
+	rowsProcessed, err := rerouteRowsToFreeStorageNodes(snb, sn, buf, getRowHasher)
 	rows -= rowsProcessed
 	if err != nil {
 		return fmt.Errorf("%d rows dropped because the current vmstorage buf is full and %w", rows, err)
@@ -150,11 +150,7 @@ func (sn *storageNode) run(snb *storageNodesBucket, snIdx int) {
 		replicas = len(sns)
 	}
 
-	sn.readOnlyCheckerWG.Add(1)
-	go func() {
-		defer sn.readOnlyCheckerWG.Done()
-		sn.readOnlyChecker()
-	}()
+	sn.readOnlyCheckerWG.Go(sn.readOnlyChecker)
 	defer sn.readOnlyCheckerWG.Wait()
 
 	d := timeutil.AddJitterToDuration(time.Millisecond * 200)
@@ -171,7 +167,7 @@ func (sn *storageNode) run(snb *storageNodesBucket, snIdx int) {
 			select {
 			case <-sn.stopCh:
 				mustStop = true
-				// Make sure the br.buf is flushed last time before returning
+				// Make sure the br bufs are flushed last time before returning
 				// in order to send the remaining bits of data.
 			case <-ticker.C:
 			}
@@ -214,7 +210,7 @@ func (sn *storageNode) run(snb *storageNodesBucket, snIdx int) {
 func sendBufToReplicasNonblocking(snb *storageNodesBucket, br *bufRows, snIdx, replicas int) bool {
 	usedStorageNodes := make(map[*storageNode]struct{}, replicas)
 	sns := snb.sns
-	for i := 0; i < replicas; i++ {
+	for i := range replicas {
 		idx := snIdx + i
 		attempts := 0
 		for {
@@ -268,6 +264,12 @@ func (sn *storageNode) checkHealth() {
 		// The sn looks healthy.
 		return
 	}
+	if deadline := sn.rpcIsNotSupportedDeadline.Load(); deadline > 0 {
+		if deadline > fasttime.UnixTimestamp() {
+			// do not attemp to re-connect
+			return
+		}
+	}
 	bc, err := sn.dial()
 	if err != nil {
 		sn.isBroken.Store(true)
@@ -300,22 +302,40 @@ func (sn *storageNode) sendBufRowsNonblocking(br *bufRows) bool {
 		// sn.dial() should be called by sn.checkHealth() on unsuccessful call to sendBufToReplicasNonblocking().
 		return false
 	}
+
 	startTime := time.Now()
-	err := sendToConn(sn.bc, br.buf)
+	var err error
+	if sn.bc.IsLegacy {
+		err = vminsertapi.SendToConn(sn.bc, br.buf)
+	} else {
+		err = vminsertapi.SendRPCRequestToConn(sn.bc, sn.rpcCall.VersionedName, br.buf)
+	}
 	duration := time.Since(startTime)
 	sn.sendDurationSeconds.Add(duration.Seconds())
+
+	now := time.Now()
+	saturation := float64(now.Sub(startTime)) / float64(now.Sub(sn.lastSendTime))
+	sn.avgSaturation.Add(saturation)
+	sn.lastSendTime = now
+
 	if err == nil {
+		if deadline := sn.rpcIsNotSupportedDeadline.Load(); deadline > 0 {
+			sn.rpcIsNotSupportedDeadline.Store(0)
+		}
 		// Successfully sent buf to bc.
 		sn.rowsSent.Add(br.rows)
 		return true
 	}
-	if errors.Is(err, errStorageReadOnly) {
+	if errors.Is(err, storage.ErrReadOnly) {
 		// The vmstorage is transitioned to readonly mode.
 		sn.isReadOnly.Store(true)
 		sn.brCond.Broadcast()
 		// Signal the caller that the data wasn't accepted by the vmstorage,
 		// so it will be re-routed to the remaining vmstorage nodes.
 		return false
+	}
+	if errors.Is(err, vminsertapi.ErrRpcIsNotSupported) {
+		sn.rpcIsNotSupportedDeadline.Store(unsupportedRPCRetrySeconds + fasttime.UnixTimestamp())
 	}
 	// Couldn't flush buf to sn. Mark sn as broken.
 	cannotSendBufsLogger.Warnf("cannot send %d bytes with %d rows to -storageNode=%q: %s; closing the connection to storageNode and "+
@@ -334,74 +354,26 @@ var cannotCloseStorageNodeConnLogger = logger.WithThrottler("cannotCloseStorageN
 
 var cannotSendBufsLogger = logger.WithThrottler("cannotSendBufRows", 5*time.Second)
 
-func sendToConn(bc *handshake.BufferedConn, buf []byte) error {
-	// if len(buf) == 0, it must be sent to the vmstorage too in order to check for vmstorage health
-	// See checkReadOnlyMode() and https://github.com/VictoriaMetrics/VictoriaMetrics/issues/4870
-
-	timeoutSeconds := len(buf) / 3e5
-	if timeoutSeconds < 60 {
-		timeoutSeconds = 60
-	}
-	timeout := time.Duration(timeoutSeconds) * time.Second
-	deadline := time.Now().Add(timeout)
-	if err := bc.SetWriteDeadline(deadline); err != nil {
-		return fmt.Errorf("cannot set write deadline to %s: %w", deadline, err)
-	}
-	// sizeBuf guarantees that the rows batch will be either fully
-	// read or fully discarded on the vmstorage side.
-	// sizeBuf is used for read optimization in vmstorage.
-	sizeBuf := sizeBufPool.Get()
-	defer sizeBufPool.Put(sizeBuf)
-	sizeBuf.B = encoding.MarshalUint64(sizeBuf.B[:0], uint64(len(buf)))
-	if _, err := bc.Write(sizeBuf.B); err != nil {
-		return fmt.Errorf("cannot write data size %d: %w", len(buf), err)
-	}
-	if _, err := bc.Write(buf); err != nil {
-		return fmt.Errorf("cannot write data with size %d: %w", len(buf), err)
-	}
-	if err := bc.Flush(); err != nil {
-		return fmt.Errorf("cannot flush data with size %d: %w", len(buf), err)
-	}
-
-	// Wait for `ack` from vmstorage.
-	// This guarantees that the message has been fully received by vmstorage.
-	deadline = time.Now().Add(timeout)
-	if err := bc.SetReadDeadline(deadline); err != nil {
-		return fmt.Errorf("cannot set read deadline for reading `ack` to vmstorage: %w", err)
-	}
-	if _, err := io.ReadFull(bc, sizeBuf.B[:1]); err != nil {
-		return fmt.Errorf("cannot read `ack` from vmstorage: %w", err)
-	}
-
-	ackResp := sizeBuf.B[0]
-	switch ackResp {
-	case 1:
-		// ok response, data successfully accepted by vmstorage
-	case 2:
-		// vmstorage is in readonly mode
-		return errStorageReadOnly
-	default:
-		return fmt.Errorf("unexpected `ack` received from vmstorage; got %d; want 1 or 2", sizeBuf.B[0])
-	}
-
-	return nil
-}
-
-var sizeBufPool bytesutil.ByteBufferPool
-
 func (sn *storageNode) dial() (*handshake.BufferedConn, error) {
-	c, err := sn.dialer.Dial()
-	if err != nil {
-		sn.dialErrors.Inc()
-		return nil, err
+
+	compression := 1
+	if *disableCompression {
+		compression = 0
 	}
-	compressionLevel := 1
-	if *disableRPCCompression {
-		compressionLevel = 0
-	}
-	bc, err := handshake.VMInsertClient(c, compressionLevel)
+	var dialError error
+	bc, err := handshake.VMInsertClientWithDialer(func() (net.Conn, error) {
+		c, err := sn.dialer.Dial()
+		if err != nil {
+			dialError = err
+			sn.dialErrors.Inc()
+			return nil, err
+		}
+		return c, nil
+	}, compression)
 	if err != nil {
-		_ = c.Close()
+		if dialError != nil {
+			return nil, dialError
+		}
 		sn.handshakeErrors.Inc()
 		return nil, fmt.Errorf("handshake error: %w", err)
 	}
@@ -410,9 +382,21 @@ func (sn *storageNode) dial() (*handshake.BufferedConn, error) {
 
 // storageNode is a client sending data to vmstorage node.
 type storageNode struct {
+
+	// rpc defines RPC method to push data from br
+	rpc vminsertapi.RPCCall
+
+	// rpcIsNotSupportedDeadline defines a timeout for the next storage rpc call
+	// if the given rpc version is not supported by storage server
+	rpcIsNotSupportedDeadline atomic.Uint64
+
+	// dropSamplesOnOverload defines whether to drop rows from br due to storage overload
+	dropRowsOnOverload bool
 	// isBroken is set to true if the given vmstorage node is temporarily unhealthy.
 	// In this case the data is re-routed to the remaining healthy vmstorage nodes.
 	isBroken atomic.Bool
+
+	rpcCall vminsertapi.RPCCall
 
 	// isReadOnly is set to true if the given vmstorage node is read only
 	// In this case the data is re-routed to the remaining healthy vmstorage nodes.
@@ -477,13 +461,18 @@ type storageNode struct {
 	// The total duration spent for sending data to vmstorage node.
 	// This metric is useful for determining the saturation of vminsert->vmstorage link.
 	sendDurationSeconds *metrics.FloatCounter
+
+	// avgSaturation tracks the moving average of (send duration / (now - lastSendTime)).
+	// Updated in run(). Used by allowRerouting to decide when to trigger slowness-based rerouting.
+	avgSaturation *variableEWMA
+	lastSendTime  time.Time
 }
 
 type storageNodesBucket struct {
 	ms *metrics.Set
 
 	// nodesHash is used for consistently selecting a storage node by key.
-	nodesHash *consistentHash
+	nodesHash *consistenthash.ConsistentHash
 
 	// sns is a list of storage nodes.
 	sns []*storageNode
@@ -492,8 +481,19 @@ type storageNodesBucket struct {
 	wg     *sync.WaitGroup
 }
 
-// storageNodes contains a list of vmstorage node clients.
-var storageNodes atomic.Pointer[storageNodesBucket]
+// storageNodes and metadataStorageNodes contains a list of vmstorage node clients.
+var (
+	storageNodes         atomic.Pointer[storageNodesBucket]
+	metadataStorageNodes atomic.Pointer[storageNodesBucket]
+)
+
+func getMetadataStorageNodesBucket() *storageNodesBucket {
+	return metadataStorageNodes.Load()
+}
+
+func setMetadataStorageNodesBucket(snb *storageNodesBucket) {
+	metadataStorageNodes.Store(snb)
+}
 
 func getStorageNodesBucket() *storageNodesBucket {
 	return storageNodes.Load()
@@ -509,17 +509,22 @@ func setStorageNodesBucket(snb *storageNodesBucket) {
 //
 // Call MustStop when the initialized vmstorage connections are no longer needed.
 func Init(addrs []string, hashSeed uint64) {
-	snb := initStorageNodes(addrs, hashSeed)
+	snb := initStorageNodes(addrs, vminsertapi.MetricRowsRpcCall, hashSeed)
 	setStorageNodesBucket(snb)
+	metadataSnb := initStorageNodes(addrs, vminsertapi.MetricMetadataRpcCall, hashSeed)
+	setMetadataStorageNodesBucket(metadataSnb)
+
 }
 
 // MustStop stops netstorage.
 func MustStop() {
 	snb := getStorageNodesBucket()
 	mustStopStorageNodes(snb)
+	metadataSnb := getMetadataStorageNodesBucket()
+	mustStopStorageNodes(metadataSnb)
 }
 
-func initStorageNodes(unsortedAddrs []string, hashSeed uint64) *storageNodesBucket {
+func initStorageNodes(unsortedAddrs []string, rpcCall vminsertapi.RPCCall, hashSeed uint64) *storageNodesBucket {
 	if len(unsortedAddrs) == 0 {
 		logger.Panicf("BUG: addrs must be non-empty")
 	}
@@ -529,9 +534,15 @@ func initStorageNodes(unsortedAddrs []string, hashSeed uint64) *storageNodesBuck
 	sort.Strings(addrs)
 
 	ms := metrics.NewSet()
-	nodesHash := newConsistentHash(addrs, hashSeed)
+	nodesHash := consistenthash.NewConsistentHash(addrs, hashSeed)
 	sns := make([]*storageNode, 0, len(addrs))
+	var dropRowsOnOverload bool
+
+	if rpcCall.Name == vminsertapi.MetricRowsRpcCall.Name {
+		dropRowsOnOverload = *dropSamplesOnOverload
+	}
 	stopCh := make(chan struct{})
+	rpcName := rpcCall.Name
 	for _, addr := range addrs {
 		normalizedAddr, err := netutil.NormalizeAddr(addr, 8400)
 		if err != nil {
@@ -540,55 +551,64 @@ func initStorageNodes(unsortedAddrs []string, hashSeed uint64) *storageNodesBuck
 		addr = normalizedAddr
 
 		sn := &storageNode{
-			dialer: netutil.NewTCPDialer(ms, "vminsert", addr, *vmstorageDialTimeout, *vmstorageUserTimeout),
+			dialer:             netutil.NewTCPDialer(ms, "vminsert_"+rpcName, addr, *vmstorageDialTimeout, *vmstorageUserTimeout),
+			rpc:                rpcCall,
+			dropRowsOnOverload: dropRowsOnOverload,
 
 			stopCh: stopCh,
 
-			dialErrors:            ms.NewCounter(fmt.Sprintf(`vm_rpc_dial_errors_total{name="vminsert", addr=%q}`, addr)),
-			handshakeErrors:       ms.NewCounter(fmt.Sprintf(`vm_rpc_handshake_errors_total{name="vminsert", addr=%q}`, addr)),
-			connectionErrors:      ms.NewCounter(fmt.Sprintf(`vm_rpc_connection_errors_total{name="vminsert", addr=%q}`, addr)),
-			rowsPushed:            ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_pushed_total{name="vminsert", addr=%q}`, addr)),
-			rowsSent:              ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_sent_total{name="vminsert", addr=%q}`, addr)),
-			rowsDroppedOnOverload: ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_dropped_on_overload_total{name="vminsert", addr=%q}`, addr)),
+			rpcCall: rpcCall,
+
+			dialErrors:            ms.NewCounter(fmt.Sprintf(`vm_rpc_dial_errors_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			handshakeErrors:       ms.NewCounter(fmt.Sprintf(`vm_rpc_handshake_errors_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			connectionErrors:      ms.NewCounter(fmt.Sprintf(`vm_rpc_connection_errors_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			rowsPushed:            ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_pushed_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			rowsSent:              ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_sent_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			rowsDroppedOnOverload: ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_dropped_on_overload_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
 			rowsDroppedOnAge:      ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_dropped_on_age{name="vminsert", addr=%q}`, addr)),
-			rowsReroutedFromHere:  ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_rerouted_from_here_total{name="vminsert", addr=%q}`, addr)),
-			rowsReroutedToHere:    ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_rerouted_to_here_total{name="vminsert", addr=%q}`, addr)),
-			sendDurationSeconds:   ms.NewFloatCounter(fmt.Sprintf(`vm_rpc_send_duration_seconds_total{name="vminsert", addr=%q}`, addr)),
+			rowsReroutedFromHere:  ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_rerouted_from_here_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			rowsReroutedToHere:    ms.NewCounter(fmt.Sprintf(`vm_rpc_rows_rerouted_to_here_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+			sendDurationSeconds:   ms.NewFloatCounter(fmt.Sprintf(`vm_rpc_send_duration_seconds_total{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name)),
+
+			avgSaturation: newMovingAverage(180),
+			lastSendTime:  time.Now(),
 		}
 		sn.brCond = sync.NewCond(&sn.brLock)
-		_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_rows_pending{name="vminsert", addr=%q}`, addr), func() float64 {
+		_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_rows_pending{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name), func() float64 {
 			sn.brLock.Lock()
 			n := sn.br.rows
 			sn.brLock.Unlock()
 			return float64(n)
 		})
-		_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_buf_pending_bytes{name="vminsert", addr=%q}`, addr), func() float64 {
+		_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_buf_pending_bytes{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name), func() float64 {
 			sn.brLock.Lock()
 			n := len(sn.br.buf)
 			sn.brLock.Unlock()
 			return float64(n)
 		})
-		_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_vmstorage_is_reachable{name="vminsert", addr=%q}`, addr), func() float64 {
-			if sn.isBroken.Load() {
-				return 0
-			}
-			return 1
-		})
-		_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_vmstorage_is_read_only{name="vminsert", addr=%q}`, addr), func() float64 {
-			if sn.isReadOnly.Load() {
+		// conditionally export health related metrics
+		if rpcCall == vminsertapi.MetricRowsRpcCall {
+			_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_vmstorage_is_reachable{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name), func() float64 {
+				if sn.isBroken.Load() {
+					return 0
+				}
 				return 1
-			}
-			return 0
-		})
+			})
+			_ = ms.NewGauge(fmt.Sprintf(`vm_rpc_vmstorage_is_read_only{name="vminsert", addr=%q, rpc_call=%q}`, addr, rpcCall.Name), func() float64 {
+				if sn.isReadOnly.Load() {
+					return 1
+				}
+				return 0
+			})
+
+		}
 		sns = append(sns, sn)
 	}
 
-	maxBufSizePerStorageNode = memory.Allowed() / 8 / len(sns)
-	if maxBufSizePerStorageNode > consts.MaxInsertPacketSizeForVMInsert {
-		maxBufSizePerStorageNode = consts.MaxInsertPacketSizeForVMInsert
-	}
+	maxBufSizePerStorageNode = min(memory.Allowed()/8/len(sns), consts.MaxInsertPacketSizeForVMInsert)
 
 	metrics.RegisterSet(ms)
+
 	var wg sync.WaitGroup
 	snb := &storageNodesBucket{
 		ms:        ms,
@@ -599,11 +619,9 @@ func initStorageNodes(unsortedAddrs []string, hashSeed uint64) *storageNodesBuck
 	}
 
 	for idx, sn := range sns {
-		wg.Add(1)
-		go func(sn *storageNode, idx int) {
+		wg.Go(func() {
 			sn.run(snb, idx)
-			wg.Done()
-		}(sn, idx)
+		})
 	}
 
 	return snb
@@ -621,27 +639,25 @@ func mustStopStorageNodes(snb *storageNodesBucket) {
 // rerouteRowsToReadyStorageNodes reroutes src from not ready snSource to ready storage nodes.
 //
 // The function blocks until src is fully re-routed.
-func rerouteRowsToReadyStorageNodes(snb *storageNodesBucket, snSource *storageNode, src []byte) (int, error) {
+func rerouteRowsToReadyStorageNodes(snb *storageNodesBucket, snSource *storageNode, src []byte, getRowHasher func() rowHasher) (int, error) {
 	reroutesTotal.Inc()
 	rowsProcessed := 0
 	var idxsExclude, idxsExcludeNew []int
 	nodesHash := snb.nodesHash
 	sns := snb.sns
 	idxsExclude = getNotReadyStorageNodeIdxsBlocking(snb, idxsExclude[:0])
-	var mr storage.MetricRow
+	rowHasher := getRowHasher()
 	for len(src) > 0 {
-		tail, err := mr.UnmarshalX(src)
+		h, tail, err := rowHasher(src)
 		if err != nil {
 			logger.Panicf("BUG: cannot unmarshal MetricRow: %s", err)
 		}
 		rowBuf := src[:len(src)-len(tail)]
 		src = tail
 		reroutedRowsProcessed.Inc()
-		h := xxhash.Sum64(mr.MetricNameRaw)
-		mr.ResetX()
 		var sn *storageNode
 		for {
-			idx := nodesHash.getNodeIdx(h, idxsExclude)
+			idx := nodesHash.GetNodeIdx(h, idxsExclude)
 			sn = sns[idx]
 			if sn.isReady() {
 				break
@@ -677,7 +693,7 @@ func rerouteRowsToReadyStorageNodes(snb *storageNodesBucket, snSource *storageNo
 		}
 		// If the re-routing is enabled, then try sending the row to another storage node.
 		idxsExcludeNew = getNotReadyStorageNodeIdxs(snb, idxsExcludeNew[:0], sn)
-		idx := nodesHash.getNodeIdx(h, idxsExcludeNew)
+		idx := nodesHash.GetNodeIdx(h, idxsExcludeNew)
 		snNew := sns[idx]
 		if !snNew.trySendBuf(rowBuf, 1) {
 			// The row cannot be sent to both snSource, sn and snNew without blocking.
@@ -694,15 +710,78 @@ func rerouteRowsToReadyStorageNodes(snb *storageNodesBucket, snSource *storageNo
 	return rowsProcessed, nil
 }
 
-// reouteRowsToFreeStorageNodes re-routes src from snSource to other storage nodes.
+var reroutingLogger = logger.WithThrottler("allowRerouting", 5*time.Second)
+
+// allowRerouting determines whether data should be rerouted from snSource to other storage nodes (sns)
+// based on performance metrics.
+//
+// It returns true only when snSource is the slowest node in the cluster
+// and significantly slower than the cluster on average.
+// See the comments below for detailed conditions.
+func allowRerouting(snSource *storageNode, sns []*storageNode) bool {
+	if *disableRerouting {
+		return false
+	}
+
+	// Do not allow rerouting if saturation is not yet warmed up.
+	snSourceSaturation := snSource.avgSaturation.Value()
+	if snSourceSaturation == 0 {
+		return false
+	}
+
+	saturations := make([]float64, 0, len(sns))
+	for _, sn := range sns {
+		// Skip not ready storage nodes.
+		if !sn.isReady() {
+			continue
+		}
+		// Do not allow rerouting if avgSaturation is not yet warmed up.
+		if sn.avgSaturation.Value() == 0 {
+			return false
+		}
+
+		// Do not allow rerouting if there is a slower storage node
+		snSaturation := sn.avgSaturation.Value()
+		if snSourceSaturation < snSaturation {
+			return false
+		}
+
+		saturations = append(saturations, snSaturation)
+	}
+	// Do not allow rerouting if there are less than 3 ready storage nodes.
+	if len(saturations) < 3 {
+		return false
+	}
+
+	// Calculate median saturation
+	sort.Float64s(saturations)
+	var medianSaturation float64
+	n := len(saturations)
+	if n%2 == 0 {
+		medianSaturation = (saturations[n/2-1] + saturations[n/2]) / 2
+	} else {
+		medianSaturation = saturations[n/2]
+	}
+
+	// Do not allow rerouting if the cluster is significantly overloaded.
+	if medianSaturation > 0.80 {
+		return false
+	}
+
+	reroutingLogger.Warnf("reroute metrics from the slowest storage %q with saturation %.2f, where cluster median saturation is %.2f", snSource.dialer.Addr(), snSourceSaturation, medianSaturation)
+	return true
+}
+
+// rerouteRowsToFreeStorageNodes re-routes src from snSource to other storage nodes.
 //
 // It is expected that snSource has no enough buffer for sending src.
 // It is expected than *disableRerouting isn't set when calling this function.
 // It is expected that len(snb.sns) >= 2
-func rerouteRowsToFreeStorageNodes(snb *storageNodesBucket, snSource *storageNode, src []byte) (int, error) {
+func rerouteRowsToFreeStorageNodes(snb *storageNodesBucket, snSource *storageNode, src []byte, getRowHasher func() rowHasher) (int, error) {
 	if *disableRerouting {
 		logger.Panicf("BUG: disableRerouting must be disabled when calling rerouteRowsToFreeStorageNodes")
 	}
+
 	sns := snb.sns
 	if len(sns) < 2 {
 		logger.Panicf("BUG: the number of storage nodes is too small for calling rerouteRowsToFreeStorageNodes: %d", len(sns))
@@ -712,17 +791,15 @@ func rerouteRowsToFreeStorageNodes(snb *storageNodesBucket, snSource *storageNod
 	var idxsExclude []int
 	nodesHash := snb.nodesHash
 	idxsExclude = getNotReadyStorageNodeIdxs(snb, idxsExclude[:0], snSource)
-	var mr storage.MetricRow
+	rowHasher := getRowHasher()
 	for len(src) > 0 {
-		tail, err := mr.UnmarshalX(src)
+		h, tail, err := rowHasher(src)
 		if err != nil {
-			logger.Panicf("BUG: cannot unmarshal MetricRow: %s", err)
+			logger.Panicf("BUG: cannot unmarshal row: %s", err)
 		}
 		rowBuf := src[:len(src)-len(tail)]
 		src = tail
 		reroutedRowsProcessed.Inc()
-		h := xxhash.Sum64(mr.MetricNameRaw)
-		mr.ResetX()
 
 	again:
 		// Try sending the row to snSource in order to minimize re-routing.
@@ -731,12 +808,12 @@ func rerouteRowsToFreeStorageNodes(snb *storageNodesBucket, snSource *storageNod
 			continue
 		}
 		// The row couldn't be sent to snSrouce. Try re-routing it to other node.
-		idx := nodesHash.getNodeIdx(h, idxsExclude)
+		idx := nodesHash.GetNodeIdx(h, idxsExclude)
 		sn := sns[idx]
 		for !sn.isReady() && len(idxsExclude) < len(sns) {
 			// re-generate idxsExclude list, since sn and snSource must be put there.
 			idxsExclude = getNotReadyStorageNodeIdxs(snb, idxsExclude[:0], snSource)
-			idx := nodesHash.getNodeIdx(h, idxsExclude)
+			idx := nodesHash.GetNodeIdx(h, idxsExclude)
 			sn = sns[idx]
 		}
 		if !sn.trySendBuf(rowBuf, 1) {
@@ -850,14 +927,18 @@ func (sn *storageNode) checkReadOnlyMode() {
 	if sn.bc == nil {
 		return
 	}
-	// send nil buff to check ack response from storage
-	err := sendToConn(sn.bc, nil)
+	var err error
+	if sn.bc.IsLegacy {
+		err = vminsertapi.SendToConn(sn.bc, nil)
+	} else {
+		err = vminsertapi.SendRPCRequestToConn(sn.bc, sn.rpcCall.VersionedName, nil)
+	}
 	if err == nil {
 		// The storage switched from readonly to non-readonly mode
 		sn.isReadOnly.Store(false)
 		return
 	}
-	if errors.Is(err, errStorageReadOnly) {
+	if errors.Is(err, storage.ErrReadOnly) {
 		// The storage remains in read-only mode
 		return
 	}

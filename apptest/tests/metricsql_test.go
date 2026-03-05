@@ -32,6 +32,8 @@ func TestSingleInstantQuery(t *testing.T) {
 	testInstantQueryDoesNotReturnStaleNaNs(t, sut)
 
 	testQueryRangeWithAtModifier(t, sut)
+
+	testLabelValuesWithUTFNames(t, sut)
 }
 
 func TestClusterInstantQuery(t *testing.T) {
@@ -44,17 +46,21 @@ func TestClusterInstantQuery(t *testing.T) {
 	testInstantQueryDoesNotReturnStaleNaNs(t, sut)
 
 	testQueryRangeWithAtModifier(t, sut)
+
+	testLabelValuesWithUTFNames(t, sut)
 }
 
 func testInstantQueryWithUTFNames(t *testing.T, sut apptest.PrometheusWriteQuerier) {
-	data := []prompb.TimeSeries{
-		{
-			Labels: []prompb.Label{
-				{Name: "__name__", Value: "3fooµ¥"},
-				{Name: "3👋tfにちは", Value: "漢©®€£"},
-			},
-			Samples: []prompb.Sample{
-				{Value: 1, Timestamp: millis("2024-01-01T00:01:00Z")},
+	data := prompb.WriteRequest{
+		Timeseries: []prompb.TimeSeries{
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "3fooµ¥"},
+					{Name: "3👋tfにちは", Value: "漢©®€£"},
+				},
+				Samples: []prompb.Sample{
+					{Value: 1, Timestamp: millis("2024-01-01T00:01:00Z")},
+				},
 			},
 		},
 	}
@@ -89,23 +95,25 @@ func testInstantQueryWithUTFNames(t *testing.T, sut apptest.PrometheusWriteQueri
 	fn(`{"3👋tfにちは"="漢©®€£"}`)
 }
 
-var staleNaNsData = func() []prompb.TimeSeries {
-	return []prompb.TimeSeries{
-		{
-			Labels: []prompb.Label{
-				{
-					Name:  "__name__",
-					Value: "metric",
+var staleNaNsData = func() prompb.WriteRequest {
+	return prompb.WriteRequest{
+		Timeseries: []prompb.TimeSeries{
+			{
+				Labels: []prompb.Label{
+					{
+						Name:  "__name__",
+						Value: "metric",
+					},
 				},
-			},
-			Samples: []prompb.Sample{
-				{
-					Value:     1,
-					Timestamp: millis("2024-01-01T00:01:00Z"),
-				},
-				{
-					Value:     decimal.StaleNaN,
-					Timestamp: millis("2024-01-01T00:02:00Z"),
+				Samples: []prompb.Sample{
+					{
+						Value:     1,
+						Timestamp: millis("2024-01-01T00:01:00Z"),
+					},
+					{
+						Value:     decimal.StaleNaN,
+						Timestamp: millis("2024-01-01T00:02:00Z"),
+					},
 				},
 			},
 		},
@@ -185,21 +193,23 @@ func testInstantQueryDoesNotReturnStaleNaNs(t *testing.T, sut apptest.Prometheus
 // However, conversion of math.NaN to int64 could behave differently depending on platform and Go version.
 // Hence, this test could succeed for some platforms even if fix is rolled back.
 func testQueryRangeWithAtModifier(t *testing.T, sut apptest.PrometheusWriteQuerier) {
-	data := []prompb.TimeSeries{
-		{
-			Labels: []prompb.Label{
-				{Name: "__name__", Value: "up"},
+	data := prompb.WriteRequest{
+		Timeseries: []prompb.TimeSeries{
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "up"},
+				},
+				Samples: []prompb.Sample{
+					{Value: 1, Timestamp: millis("2025-01-01T00:01:00Z")},
+				},
 			},
-			Samples: []prompb.Sample{
-				{Value: 1, Timestamp: millis("2025-01-01T00:01:00Z")},
-			},
-		},
-		{
-			Labels: []prompb.Label{
-				{Name: "__name__", Value: "metricNaN"},
-			},
-			Samples: []prompb.Sample{
-				{Value: decimal.StaleNaN, Timestamp: millis("2025-01-01T00:01:00Z")},
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "metricNaN"},
+				},
+				Samples: []prompb.Sample{
+					{Value: decimal.StaleNaN, Timestamp: millis("2025-01-01T00:01:00Z")},
+				},
 			},
 		},
 	}
@@ -228,5 +238,48 @@ func testQueryRangeWithAtModifier(t *testing.T, sut apptest.PrometheusWriteQueri
 	}
 	if !strings.Contains(resp.Error, "modifier must return a non-NaN value") {
 		t.Fatalf("unexpected error: %q", resp.Error)
+	}
+}
+
+// This test checks that label values are decoded from UTF-8 according to Prometheus spec.
+// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/10446
+// Spec: https://prometheus.io/docs/prometheus/latest/querying/api/#querying-label-values
+func testLabelValuesWithUTFNames(t *testing.T, sut apptest.PrometheusWriteQuerier) {
+
+	timestamp := millis("2025-01-01T00:00:00Z")
+	data := prompb.WriteRequest{
+		Timeseries: []prompb.TimeSeries{
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "labelvals"},
+					{Name: "kubernetes_something/special&' chars", Value: "漢©®€£"},
+					{Name: "3👋tfにちは", Value: "漢©®€£"},
+				},
+				Samples: []prompb.Sample{
+					{Value: 1, Timestamp: timestamp},
+				},
+			},
+		},
+	}
+
+	sut.PrometheusAPIV1Write(t, data, apptest.QueryOpts{})
+	sut.ForceFlush(t)
+
+	cmpOptions := []cmp.Option{}
+
+	// encoded via prometheus model.EscapeName(string,model.ValueEncodingEscaping)
+	want := map[string][]string{
+		"__name__": {"labelvals"},
+		"U__kubernetes__something_2f_special_26__27__20_chars": {"漢©®€£"},
+		"U___33__1f44b_tf_306b__3061__306f_":                   {"漢©®€£"},
+	}
+	for labelName, expected := range want {
+		got := sut.PrometheusAPIV1LabelValues(t, labelName, `{__name__="labelvals"}`, apptest.QueryOpts{
+			Start: fmt.Sprintf("%d", timestamp),
+			End:   fmt.Sprintf("%d", timestamp),
+		})
+		if diff := cmp.Diff(expected, got.Data, cmpOptions...); diff != "" {
+			t.Errorf("unexpected response (-want, +got):\n%s", diff)
+		}
 	}
 }

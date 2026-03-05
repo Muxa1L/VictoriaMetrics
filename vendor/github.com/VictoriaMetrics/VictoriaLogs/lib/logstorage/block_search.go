@@ -19,8 +19,8 @@ type blockSearchWork struct {
 	// p is the part where the block belongs to.
 	p *part
 
-	// so contains search options for the block search.
-	so *searchOptions
+	// pso contains search options for the block search.
+	pso *partitionSearchOptions
 
 	// bh is the header of the block to search.
 	bh blockHeader
@@ -28,7 +28,7 @@ type blockSearchWork struct {
 
 func (bsw *blockSearchWork) reset() {
 	bsw.p = nil
-	bsw.so = nil
+	bsw.pso = nil
 	bsw.bh.reset()
 }
 
@@ -61,12 +61,12 @@ func putBlockSearchWorkBatch(bswb *blockSearchWorkBatch) {
 
 var blockSearchWorkBatchPool sync.Pool
 
-func (bswb *blockSearchWorkBatch) appendBlockSearchWork(p *part, so *searchOptions, bh *blockHeader) bool {
+func (bswb *blockSearchWorkBatch) appendBlockSearchWork(p *part, pso *partitionSearchOptions, bh *blockHeader) bool {
 	bsws := bswb.bsws
 
 	bsws = append(bsws, blockSearchWork{
-		p:  p,
-		so: so,
+		p:   p,
+		pso: pso,
 	})
 	bsw := &bsws[len(bsws)-1]
 	bsw.bh.copyFrom(bh)
@@ -96,6 +96,9 @@ func putBlockSearch(bs *blockSearch) {
 var blockSearchPool sync.Pool
 
 type blockSearch struct {
+	// qs is updated by the blockSearch.search with various search stats
+	qs *QueryStats
+
 	// bsw is the actual work to perform on the given block pointed by bsw.ph
 	bsw *blockSearchWork
 
@@ -148,6 +151,7 @@ type blockSearch struct {
 }
 
 func (bs *blockSearch) reset() {
+	bs.qs = nil
 	bs.bsw = nil
 	bs.br.reset()
 
@@ -204,15 +208,16 @@ func (bs *blockSearch) partPath() string {
 	return bs.bsw.p.path
 }
 
-func (bs *blockSearch) search(bsw *blockSearchWork, bm *bitmap) {
+func (bs *blockSearch) search(qs *QueryStats, bsw *blockSearchWork, bm *bitmap) {
 	bs.reset()
 
+	bs.qs = qs
 	bs.bsw = bsw
 
 	// search rows matching the given filter
 	bm.init(int(bsw.bh.rowsCount))
 	bm.setBits()
-	bs.bsw.so.filter.applyToBlockSearch(bs, bm)
+	bs.bsw.pso.filter.applyToBlockSearch(bs, bm)
 
 	if bm.isZero() {
 		// The filter doesn't match any logs in the current block.
@@ -222,15 +227,22 @@ func (bs *blockSearch) search(bsw *blockSearchWork, bm *bitmap) {
 	bs.br.mustInit(bs, bm)
 
 	// fetch the requested columns to bs.br.
-	bs.br.initColumns(bsw.so.fieldsFilter)
+	bs.br.initColumns(bsw.pso.fieldsFilter)
 }
 
 func (bs *blockSearch) partFormatVersion() uint {
 	return bs.bsw.p.ph.FormatVersion
 }
 
+func (bs *blockSearch) isHiddenField(name string) bool {
+	return bs.bsw.pso.hiddenFieldsFilter.MatchString(name)
+}
+
 func (bs *blockSearch) getConstColumnValue(name string) string {
 	name = getCanonicalFieldName(name)
+	if bs.isHiddenField(name) {
+		return ""
+	}
 
 	if bs.partFormatVersion() < 1 {
 		csh := bs.getColumnsHeader()
@@ -277,6 +289,9 @@ func (bs *blockSearch) getConstColumnValue(name string) string {
 
 func (bs *blockSearch) getColumnHeader(name string) *columnHeader {
 	name = getCanonicalFieldName(name)
+	if bs.isHiddenField(name) {
+		return nil
+	}
 
 	if bs.partFormatVersion() < 1 {
 		csh := bs.getColumnsHeader()
@@ -342,7 +357,7 @@ func (bs *blockSearch) getColumnsHeaderIndex() *columnsHeaderIndex {
 	}
 
 	if bs.cshIndexCache == nil {
-		bs.cshIndexBlockCache = readColumnsHeaderIndexBlock(bs.cshIndexBlockCache[:0], bs.bsw.p, &bs.bsw.bh)
+		bs.cshIndexBlockCache = readColumnsHeaderIndexBlock(bs.cshIndexBlockCache[:0], bs.bsw.p, &bs.bsw.bh, bs.qs)
 
 		bs.cshIndexCache = getColumnsHeaderIndex()
 		if err := bs.cshIndexCache.unmarshalInplace(bs.cshIndexBlockCache); err != nil {
@@ -375,13 +390,13 @@ func (bs *blockSearch) getColumnsHeader() *columnsHeader {
 
 func (bs *blockSearch) getColumnsHeaderBlock() []byte {
 	if !bs.cshBlockInitialized {
-		bs.cshBlockCache = readColumnsHeaderBlock(bs.cshBlockCache[:0], bs.bsw.p, &bs.bsw.bh)
+		bs.cshBlockCache = readColumnsHeaderBlock(bs.cshBlockCache[:0], bs.bsw.p, &bs.bsw.bh, bs.qs)
 		bs.cshBlockInitialized = true
 	}
 	return bs.cshBlockCache
 }
 
-func readColumnsHeaderIndexBlock(dst []byte, p *part, bh *blockHeader) []byte {
+func readColumnsHeaderIndexBlock(dst []byte, p *part, bh *blockHeader, qs *QueryStats) []byte {
 	n := bh.columnsHeaderIndexSize
 	if n > maxColumnsHeaderIndexSize {
 		logger.Panicf("FATAL: %s: columns header index size cannot exceed %d bytes; got %d bytes", p.path, maxColumnsHeaderIndexSize, n)
@@ -391,10 +406,12 @@ func readColumnsHeaderIndexBlock(dst []byte, p *part, bh *blockHeader) []byte {
 	dst = bytesutil.ResizeNoCopyMayOverallocate(dst, int(n)+dstLen)
 	p.columnsHeaderIndexFile.MustReadAt(dst[dstLen:], int64(bh.columnsHeaderIndexOffset))
 
+	qs.BytesReadColumnsHeaderIndexes += bh.columnsHeaderIndexSize
+
 	return dst
 }
 
-func readColumnsHeaderBlock(dst []byte, p *part, bh *blockHeader) []byte {
+func readColumnsHeaderBlock(dst []byte, p *part, bh *blockHeader, qs *QueryStats) []byte {
 	n := bh.columnsHeaderSize
 	if n > maxColumnsHeaderSize {
 		logger.Panicf("FATAL: %s: columns header size cannot exceed %d bytes; got %d bytes", p.path, maxColumnsHeaderSize, n)
@@ -402,6 +419,9 @@ func readColumnsHeaderBlock(dst []byte, p *part, bh *blockHeader) []byte {
 	dstLen := len(dst)
 	dst = bytesutil.ResizeNoCopyMayOverallocate(dst, int(n)+dstLen)
 	p.columnsHeaderFile.MustReadAt(dst[dstLen:], int64(bh.columnsHeaderOffset))
+
+	qs.BytesReadColumnsHeaders += bh.columnsHeaderSize
+
 	return dst
 }
 
@@ -423,8 +443,10 @@ func (bs *blockSearch) getBloomFilterForColumn(ch *columnHeader) *bloomFilter {
 		logger.Panicf("FATAL: %s: bloom filter block size cannot exceed %d bytes; got %d bytes", bs.partPath(), maxBloomFilterBlockSize, bloomFilterSize)
 	}
 	bb.B = bytesutil.ResizeNoCopyMayOverallocate(bb.B, int(bloomFilterSize))
-
 	bloomValuesFile.bloom.MustReadAt(bb.B, int64(ch.bloomFilterOffset))
+
+	bs.qs.BytesReadBloomFilters += ch.bloomFilterSize
+
 	bf = getBloomFilter()
 	if err := bf.unmarshal(bb.B); err != nil {
 		logger.Panicf("FATAL: %s: cannot unmarshal bloom filter: %s", bs.partPath(), err)
@@ -458,6 +480,8 @@ func (bs *blockSearch) getValuesForColumn(ch *columnHeader) []string {
 	bb.B = bytesutil.ResizeNoCopyMayOverallocate(bb.B, int(valuesSize))
 	bloomValuesFile.values.MustReadAt(bb.B, int64(ch.valuesOffset))
 
+	bs.qs.BytesReadValues += ch.valuesSize
+
 	values = getStringBucket()
 	var err error
 	values.a, err = bs.sbu.unmarshal(values.a[:0], bb.B, bs.bsw.bh.rowsCount)
@@ -466,11 +490,35 @@ func (bs *blockSearch) getValuesForColumn(ch *columnHeader) []string {
 		logger.Panicf("FATAL: %s: cannot unmarshal column %q: %s", bs.partPath(), ch.name, err)
 	}
 
+	bs.qs.ValuesRead += uint64(len(values.a))
+	bs.qs.BytesProcessedUncompressedValues += getStringsLen(values.a)
+
 	if bs.valuesCache == nil {
 		bs.valuesCache = make(map[string]*stringBucket)
 	}
 	bs.valuesCache[ch.name] = values
 	return values.a
+}
+
+func getStringsLen(a []string) uint64 {
+	var n uint64
+	for _, s := range a {
+		n += uint64(len(s))
+	}
+	return n
+}
+
+func (bs *blockSearch) subTimeOffsetToTimestamps(timeOffset int64) {
+	bs.bsw.bh.timestampsHeader.subTimeOffset(timeOffset)
+	if bs.timestampsCache != nil {
+		subTimeOffset(bs.timestampsCache.A, timeOffset)
+	}
+}
+
+func subTimeOffset(timestamps []int64, timeOffset int64) {
+	for i := range timestamps {
+		timestamps[i] = SubInt64NoOverflow(timestamps[i], timeOffset)
+	}
 }
 
 // getTimestamps returns timestamps for the given bs.
@@ -493,6 +541,9 @@ func (bs *blockSearch) getTimestamps() []int64 {
 	bb.B = bytesutil.ResizeNoCopyMayOverallocate(bb.B, int(blockSize))
 	p.timestampsFile.MustReadAt(bb.B, int64(th.blockOffset))
 
+	bs.qs.BytesReadTimestamps += blockSize
+	bs.qs.TimestampsRead += bs.bsw.bh.rowsCount
+
 	rowsCount := int(bs.bsw.bh.rowsCount)
 	timestamps = encoding.GetInt64s(rowsCount)
 	var err error
@@ -501,12 +552,13 @@ func (bs *blockSearch) getTimestamps() []int64 {
 	if err != nil {
 		logger.Panicf("FATAL: %s: cannot unmarshal timestamps: %s", bs.partPath(), err)
 	}
+
 	bs.timestampsCache = timestamps
 	return timestamps.A
 }
 
 // mustReadBlockHeaders reads ih block headers from p, appends them to dst and returns the result.
-func (ih *indexBlockHeader) mustReadBlockHeaders(dst []blockHeader, p *part) []blockHeader {
+func (ih *indexBlockHeader) mustReadBlockHeaders(dst []blockHeader, p *part, qs *QueryStats) []blockHeader {
 	bbCompressed := longTermBufPool.Get()
 	indexBlockSize := ih.indexBlockSize
 	if indexBlockSize > maxIndexBlockSize {
@@ -514,6 +566,8 @@ func (ih *indexBlockHeader) mustReadBlockHeaders(dst []blockHeader, p *part) []b
 	}
 	bbCompressed.B = bytesutil.ResizeNoCopyMayOverallocate(bbCompressed.B, int(indexBlockSize))
 	p.indexFile.MustReadAt(bbCompressed.B, int64(ih.indexBlockOffset))
+
+	qs.BytesReadBlockHeaders += ih.indexBlockSize
 
 	bb := longTermBufPool.Get()
 	var err error
@@ -560,20 +614,7 @@ func (bs *blockSearch) getStreamStrSlow() string {
 	bb := bbPool.Get()
 	defer bbPool.Put(bb)
 
-	bb.B = bs.bsw.p.pt.idb.appendStreamTagsByStreamID(bb.B[:0], &bs.bsw.bh.streamID)
-	if len(bb.B) == 0 {
-		// Couldn't find stream tags by sid. This may be the case when the corresponding log stream
-		// was recently registered and its tags aren't visible to search yet.
-		// The stream tags must become visible in a few seconds.
-		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/6042
-		return ""
-	}
-
-	st := GetStreamTags()
-	streamTagsCanonical := bytesutil.ToUnsafeString(bb.B)
-	mustUnmarshalStreamTags(st, streamTagsCanonical)
-	bb.B = st.marshalString(bb.B[:0])
-	PutStreamTags(st)
+	bb.B = bs.bsw.p.pt.idb.appendStreamString(bb.B[:0], &bs.bsw.bh.streamID)
 
 	return string(bb.B)
 }

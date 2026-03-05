@@ -277,6 +277,50 @@ users:
   metric_labels:
     not-prometheus-compatible: value
 `)
+	// placeholder in url_prefix
+	f(`
+users:
+- username: foo
+  password: bar
+  url_prefix: 'http://ahost/{{a_placeholder}}/foobar'
+`)
+	// placeholder in a header
+	f(`
+users:
+- username: foo
+  password: bar
+  headers:
+  - 'X-Foo: {{a_placeholder}}'
+  url_prefix: 'http://ahost'
+`)
+	// placeholder in url_prefix
+	f(`
+users:
+- username: foo
+  password: bar
+  url_prefix: 'http://ahost/{{a_placeholder}}/foobar'
+`)
+	// placeholder in a header in url_map
+	f(`
+users:
+- username: foo
+  password: bar
+  url_map:
+    - src_paths: ["/select/.*"]
+      headers:
+        - 'X-Foo: {{a_placeholder}}'
+      url_prefix: 'http://ahost'
+`)
+
+	// placeholder in a header in url_map
+	f(`
+users:
+- username: foo
+  password: bar
+  url_map:
+    - src_paths: ["/select/.*"]
+      url_prefix: 'http://ahost/{{a_placeholder}}/foobar'
+`)
 }
 
 func TestParseAuthConfigSuccess(t *testing.T) {
@@ -378,7 +422,7 @@ users:
 			RetryStatusCodes:       []int{500, 501},
 			LoadBalancingPolicy:    "first_available",
 			MergeQueryArgs:         []string{"foo", "bar"},
-			DropSrcPathPrefixParts: intp(1),
+			DropSrcPathPrefixParts: new(1),
 			DiscoverBackendIPs:     &discoverBackendIPsTrue,
 		},
 	}, nil)
@@ -621,6 +665,47 @@ unauthorized_user:
 			},
 		},
 	})
+
+	// skip user info with jwt, it is parsed by parseJWTUsers
+	f(`
+users:
+- username: foo
+  password: bar
+  url_prefix: http://aaa:343/bbb
+- jwt: {skip_verify: true}
+  url_prefix: http://aaa:343/bbb
+`, map[string]*UserInfo{
+		getHTTPAuthBasicToken("foo", "bar"): {
+			Username:  "foo",
+			Password:  "bar",
+			URLPrefix: mustParseURL("http://aaa:343/bbb"),
+		},
+	}, nil)
+
+	// Multiple users with access logs enabled
+	f(`
+users:
+- username: foo
+  url_prefix: http://foo
+  access_log: {}
+- username: bar
+  url_prefix: https://bar/x/
+  access_log:
+    filters:
+      skip_status_codes: [404]
+`, map[string]*UserInfo{
+		getHTTPAuthBasicToken("foo", ""): {
+			Username:  "foo",
+			URLPrefix: mustParseURL("http://foo"),
+			AccessLog: &AccessLog{},
+		},
+		getHTTPAuthBasicToken("bar", ""): {
+			Username:  "bar",
+			URLPrefix: mustParseURL("https://bar/x/"),
+			AccessLog: &AccessLog{Filters: &AccessLogFilters{SkipStatusCodes: []int{404}}},
+		},
+	}, nil)
+
 }
 
 func TestParseAuthConfigPassesTLSVerificationConfig(t *testing.T) {
@@ -752,10 +837,12 @@ func TestGetLeastLoadedBackendURL(t *testing.T) {
 	})
 	up.loadBalancingPolicy = "least_loaded"
 
+	pbus := up.bus.Load()
+	bus := pbus.bus
+
 	fn := func(ns ...int) {
 		t.Helper()
-		pbus := up.bus.Load()
-		bus := *pbus
+
 		for i, b := range bus {
 			got := int(b.concurrentRequests.Load())
 			exp := ns[i]
@@ -767,45 +854,52 @@ func TestGetLeastLoadedBackendURL(t *testing.T) {
 
 	up.getBackendURL()
 	fn(1, 0, 0)
+
 	up.getBackendURL()
 	fn(1, 1, 0)
+
 	up.getBackendURL()
 	fn(1, 1, 1)
 
-	up.getBackendURL()
-	up.getBackendURL()
-	fn(2, 2, 1)
-
-	bus := up.bus.Load()
-	pbus := *bus
-	pbus[0].concurrentRequests.Add(2)
-	pbus[2].concurrentRequests.Add(5)
-	fn(4, 2, 6)
+	bus[1].put()
+	bus[2].put()
+	fn(1, 0, 0)
 
 	up.getBackendURL()
-	fn(4, 3, 6)
+	fn(1, 1, 0)
 
+	bus[1].put()
 	up.getBackendURL()
-	fn(4, 4, 6)
-
-	up.getBackendURL()
-	fn(4, 5, 6)
-
-	up.getBackendURL()
-	fn(5, 5, 6)
-
-	up.getBackendURL()
-	fn(6, 5, 6)
-
-	up.getBackendURL()
-	fn(6, 6, 6)
-
-	up.getBackendURL()
-	fn(6, 6, 7)
+	fn(1, 0, 1)
 
 	up.getBackendURL()
 	up.getBackendURL()
-	fn(7, 7, 7)
+	fn(1, 1, 2)
+
+	bus[0].concurrentRequests.Add(2)
+	bus[2].concurrentRequests.Add(2)
+	fn(3, 1, 4)
+
+	up.getBackendURL()
+	fn(3, 2, 4)
+
+	up.getBackendURL()
+	fn(3, 3, 4)
+
+	up.getBackendURL()
+	fn(4, 3, 4)
+
+	up.getBackendURL()
+	fn(4, 4, 4)
+
+	bus[0].put()
+	bus[2].put()
+
+	up.getBackendURL()
+	fn(3, 4, 4)
+
+	up.getBackendURL()
+	fn(4, 4, 4)
 }
 
 func TestBrokenBackend(t *testing.T) {
@@ -816,13 +910,13 @@ func TestBrokenBackend(t *testing.T) {
 	})
 	up.loadBalancingPolicy = "least_loaded"
 	pbus := up.bus.Load()
-	bus := *pbus
+	bus := pbus.bus
 
 	// explicitly mark one of the backends as broken
 	bus[1].setBroken()
 
 	// broken backend should never return while there are healthy backends
-	for i := 0; i < 1e3; i++ {
+	for range int(1e3) {
 		b := up.getBackendURL()
 		if b.isBroken() {
 			t.Fatalf("unexpected broken backend %q", b.url)
@@ -839,7 +933,7 @@ func TestDiscoverBackendIPsWithIPV6(t *testing.T) {
 
 		up.discoverBackendAddrsIfNeeded()
 		pbus := up.bus.Load()
-		bus := *pbus
+		bus := pbus.bus
 
 		if len(bus) != 1 {
 			t.Fatalf("expected url list to be of size 1; got %d instead", len(bus))
@@ -933,16 +1027,14 @@ func mustParseURL(u string) *URLPrefix {
 }
 
 func mustParseURLs(us []string) *URLPrefix {
-	bus := make([]*backendURL, len(us))
+	bus := newBackendURLs()
 	urls := make([]*url.URL, len(us))
 	for i, u := range us {
 		pu, err := url.Parse(u)
 		if err != nil {
 			panic(fmt.Errorf("BUG: cannot parse %q: %w", u, err))
 		}
-		bus[i] = &backendURL{
-			url: pu,
-		}
+		bus.add(pu)
 		urls[i] = pu
 	}
 	up := &URLPrefix{}
@@ -951,13 +1043,9 @@ func mustParseURLs(us []string) *URLPrefix {
 	} else {
 		up.vOriginal = us
 	}
-	up.bus.Store(&bus)
+	up.bus.Store(bus)
 	up.busOriginal = urls
 	return up
-}
-
-func intp(n int) *int {
-	return &n
 }
 
 func mustNewRegex(s string) *Regex {

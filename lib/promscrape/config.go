@@ -82,8 +82,8 @@ var (
 	clusterName = flag.String("promscrape.cluster.name", "", "Optional name of the cluster. If multiple vmagent clusters scrape the same targets, "+
 		"then each cluster must have unique name in order to properly de-duplicate samples received from these clusters. "+
 		"See https://docs.victoriametrics.com/victoriametrics/vmagent/#scraping-big-number-of-targets for more info")
-	maxScrapeSize = flagutil.NewBytes("promscrape.maxScrapeSize", 16*1024*1024, "The maximum size of scrape response in bytes to process from Prometheus targets. "+
-		"Bigger responses are rejected. See also max_scrape_size option at https://docs.victoriametrics.com/victoriametrics/sd_configs/#scrape_configs")
+	maxScrapeSize = flagutil.NewBytes("promscrape.maxScrapeSize", 16*1024*1024, "The maximum size of uncompressed scrape response in bytes to process from Prometheus targets. "+
+		"Bigger uncompressed responses are rejected. See also max_scrape_size option at https://docs.victoriametrics.com/victoriametrics/sd_configs/#scrape_configs")
 )
 
 var clusterMemberID int
@@ -262,6 +262,7 @@ func (cfg *Config) getJobNames() []string {
 // See https://prometheus.io/docs/prometheus/latest/configuration/configuration/
 type GlobalConfig struct {
 	LabelLimit           int                         `yaml:"label_limit,omitempty"`
+	SampleLimit          int                         `yaml:"sample_limit,omitempty"`
 	ScrapeInterval       *promutil.Duration          `yaml:"scrape_interval,omitempty"`
 	ScrapeTimeout        *promutil.Duration          `yaml:"scrape_timeout,omitempty"`
 	ExternalLabels       *promutil.Labels            `yaml:"external_labels,omitempty"`
@@ -823,20 +824,23 @@ func (cfg *Config) getScrapeWorkGeneric(visitConfigs func(sc *ScrapeConfig, visi
 	dst := make([]*ScrapeWork, 0, len(prev))
 	for _, sc := range cfg.ScrapeConfigs {
 		dstLen := len(dst)
-		ok := true
+
+		// hasSuccess indicates that at least one xxxSDConfig in the []*xxxSDConfig list has returned a successful response.
+		// Therefore, the service discovery result should be updated based on the current round of results.
+		//
+		// If no successful response is received (i.e., hasSuccess is false), fall back to the result from the previous round.
+		hasSuccess := false
 		visitConfigs(sc, func(sdc targetLabelsGetter) {
-			if !ok {
-				return
-			}
 			targetLabels, err := sdc.GetLabels(cfg.baseDir)
 			if err != nil {
-				logger.Errorf("skipping %s targets for job_name=%s because of error: %s", discoveryType, sc.swc.jobName, err)
-				ok = false
+				logger.Errorf("skipping some %s targets for job_name=%s because of error: %s", discoveryType, sc.swc.jobName, err)
+				hasSuccess = hasSuccess || false
 				return
 			}
+			hasSuccess = true
 			dst = appendScrapeWorkForTargetLabels(dst, sc.swc, targetLabels, discoveryType)
 		})
-		if !ok {
+		if !hasSuccess {
 			dst = sc.appendPrevTargets(dst[:dstLen], swsPrevByJob, discoveryType)
 		}
 	}
@@ -952,6 +956,10 @@ func getScrapeWorkConfig(sc *ScrapeConfig, baseDir string, globalCfg *GlobalConf
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse `metric_relabel_configs` for `job_name` %q: %w", jobName, err)
 	}
+	sampleLimit := sc.SampleLimit
+	if sampleLimit <= 0 {
+		sampleLimit = globalCfg.SampleLimit
+	}
 	externalLabels := globalCfg.ExternalLabels
 	noStaleTracking := *noStaleMarkers
 	if sc.NoStaleMarkers != nil {
@@ -984,7 +992,7 @@ func getScrapeWorkConfig(sc *ScrapeConfig, baseDir string, globalCfg *GlobalConf
 		externalLabels:       externalLabels,
 		relabelConfigs:       relabelConfigs,
 		metricRelabelConfigs: metricRelabelConfigs,
-		sampleLimit:          sc.SampleLimit,
+		sampleLimit:          sampleLimit,
 		labelLimit:           labelLimit,
 		disableCompression:   disableCompression,
 		disableKeepAlive:     sc.DisableKeepAlive,
@@ -1037,7 +1045,7 @@ func appendScrapeWorkForTargetLabels(dst []*ScrapeWork, swc *scrapeWorkConfig, t
 	goroutines := cgroup.AvailableCPUs()
 	resultCh := make(chan result, len(targetLabels))
 	workCh := make(chan *promutil.Labels, goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			for metaLabels := range workCh {
 				target := metaLabels.Get("__address__")
@@ -1150,7 +1158,7 @@ func getClusterMemberNumsForScrapeWork(key string, membersCount, replicasCount i
 		replicasCount = 1
 	}
 	memberNums := make([]int, replicasCount)
-	for i := 0; i < replicasCount; i++ {
+	for i := range replicasCount {
 		memberNums[i] = idx
 		idx++
 		if idx >= membersCount {
@@ -1167,9 +1175,9 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 	defer promutil.PutLabels(labels)
 
 	mergeLabels(labels, swc, target, extraLabels, metaLabels)
-	var originalLabels *promutil.Labels
+	var originalLabels *compressedLabels
 	if !*dropOriginalLabels {
-		originalLabels = labels.Clone()
+		originalLabels = newCompressedLabels(labels)
 	}
 	labels.Labels = swc.relabelConfigs.Apply(labels.Labels, 0)
 	// Remove labels starting from "__meta_" prefix according to https://www.robustperception.io/life-of-a-label/
@@ -1177,7 +1185,6 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 
 	if labels.Len() == 0 {
 		// Drop target without labels.
-		originalLabels = sortOriginalLabelsIfNeeded(originalLabels)
 		droppedTargetsMap.Register(originalLabels, swc.relabelConfigs, targetDropReasonRelabeling, nil)
 		return nil, nil
 	}
@@ -1192,7 +1199,6 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 		memberNums := getClusterMemberNumsForScrapeWork(bytesutil.ToUnsafeString(bb.B), *clusterMembersCount, *clusterReplicationFactor)
 		scrapeWorkKeyBufPool.Put(bb)
 		if !slices.Contains(memberNums, clusterMemberID) {
-			originalLabels = sortOriginalLabelsIfNeeded(originalLabels)
 			droppedTargetsMap.Register(originalLabels, swc.relabelConfigs, targetDropReasonSharding, memberNums)
 			return nil, nil
 		}
@@ -1200,7 +1206,6 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 	scrapeURL, address := promrelabel.GetScrapeURL(labels, swc.params)
 	if scrapeURL == "" {
 		// Drop target without URL.
-		originalLabels = sortOriginalLabelsIfNeeded(originalLabels)
 		droppedTargetsMap.Register(originalLabels, swc.relabelConfigs, targetDropReasonMissingScrapeURL, nil)
 		return nil, nil
 	}
@@ -1293,7 +1298,6 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 	// Reduce memory usage by interning all the strings in labels.
 	labelsCopy.InternStrings()
 
-	originalLabels = sortOriginalLabelsIfNeeded(originalLabels)
 	sw := &ScrapeWork{
 		ScrapeURL:            scrapeURL,
 		ScrapeInterval:       scrapeInterval,
@@ -1324,16 +1328,6 @@ func (swc *scrapeWorkConfig) getScrapeWork(target string, extraLabels, metaLabel
 		jobNameOriginal: swc.jobName,
 	}
 	return sw, nil
-}
-
-func sortOriginalLabelsIfNeeded(originalLabels *promutil.Labels) *promutil.Labels {
-	if originalLabels == nil {
-		return nil
-	}
-	originalLabels.Sort()
-	// Reduce memory usage by interning all the strings in originalLabels.
-	originalLabels.InternStrings()
-	return originalLabels
 }
 
 func mergeLabels(dst *promutil.Labels, swc *scrapeWorkConfig, target string, extraLabels, metaLabels *promutil.Labels) {

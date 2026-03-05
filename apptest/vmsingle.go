@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -211,10 +212,9 @@ func (app *Vmsingle) OpenTSDBAPIPut(t *testing.T, records []string, opts QueryOp
 // PrometheusAPIV1Write is a test helper function that inserts a
 // collection of records in Prometheus remote-write format by sending a HTTP
 // POST request to /prometheus/api/v1/write vmsingle endpoint.
-func (app *Vmsingle) PrometheusAPIV1Write(t *testing.T, records []prompb.TimeSeries, _ QueryOpts) {
+func (app *Vmsingle) PrometheusAPIV1Write(t *testing.T, wr prompb.WriteRequest, _ QueryOpts) {
 	t.Helper()
 
-	wr := prompb.WriteRequest{Timeseries: records}
 	data := snappy.Encode(nil, wr.MarshalProtobuf(nil))
 	_, statusCode := app.cli.Post(t, app.prometheusAPIV1WriteURL, "application/x-protobuf", data)
 	if statusCode != http.StatusNoContent {
@@ -364,6 +364,20 @@ func (app *Vmsingle) PrometheusAPIV1LabelValues(t *testing.T, labelName, matchQu
 	return NewPrometheusAPIV1LabelValuesResponse(t, res)
 }
 
+// PrometheusAPIV1Metadata sends a query to a /prometheus/api/v1/metadata endpoint
+// and returns the results.
+func (app *Vmsingle) PrometheusAPIV1Metadata(t *testing.T, metric string, limit int, opts QueryOpts) *PrometheusAPIV1Metadata {
+	t.Helper()
+
+	values := opts.asURLValues()
+	values.Add("metric", metric)
+	values.Add("limit", strconv.Itoa(limit))
+	queryURL := fmt.Sprintf("http://%s/prometheus/api/v1/metadata", app.httpListenAddr)
+
+	res, _ := app.cli.PostForm(t, queryURL, values)
+	return NewPrometheusAPIV1Metadata(t, res)
+}
+
 // APIV1AdminTSDBDeleteSeries deletes the series that match the query by sending
 // a request to /api/v1/admin/tsdb/delete_series.
 //
@@ -398,6 +412,43 @@ func (app *Vmsingle) GraphiteMetricsIndex(t *testing.T, _ QueryOpts) GraphiteMet
 		t.Fatalf("could not unmarshal metrics index response data:\n%s\n err: %v", res, err)
 	}
 	return index
+}
+
+// GraphiteTagsTagSeries is a test helper function that registers Graphite tags
+// for a single time series by sending a HTTP POST request to
+// /graphite/tags/tagSeries vmsingle endpoint.
+func (app *Vmsingle) GraphiteTagsTagSeries(t *testing.T, record string, opts QueryOpts) string {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s/graphite/tags/tagSeries", app.httpListenAddr)
+	values := opts.asURLValues()
+	values.Add("path", record)
+
+	res, statusCode := app.cli.PostForm(t, url, values)
+	if statusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d, want %d; response body: %q", statusCode, http.StatusOK, res)
+	}
+	return res
+}
+
+func (app *Vmsingle) GraphiteTagsTagMultiSeries(t *testing.T, records []string, opts QueryOpts) []string {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s/graphite/tags/tagMultiSeries", app.httpListenAddr)
+	values := opts.asURLValues()
+	for _, rec := range records {
+		values.Add("path", rec)
+	}
+
+	res, statusCode := app.cli.PostForm(t, url, values)
+	if statusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusOK)
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(res), &tags); err != nil {
+		t.Fatalf("could not unmarshal response:\n%s\n err: %v", res, err)
+	}
+	return tags
 }
 
 // APIV1StatusMetricNamesStats sends a query to a /api/v1/status/metric_names_stats endpoint
@@ -552,12 +603,6 @@ func (app *Vmsingle) SnapshotDeleteAll(t *testing.T) *SnapshotDeleteAllResponse 
 	return &res
 }
 
-// HTTPAddr returns the address at which the vmstorage process is listening
-// for http connections.
-func (app *Vmsingle) HTTPAddr() string {
-	return app.httpListenAddr
-}
-
 // APIV1StatusTSDB sends a query to a /prometheus/api/v1/status/tsdb
 // //
 // See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#tsdb-stats
@@ -587,6 +632,31 @@ func (app *Vmsingle) APIV1StatusTSDB(t *testing.T, matchQuery string, date strin
 	}
 	status.Sort()
 	return status
+}
+
+// ZabbixConnectorHistory is a test helper function that inserts a
+// collection of records in zabbixconnector  format by sending a HTTP
+// POST request to /zabbixconnector/api/v1/history vmsingle endpoint.
+func (app *Vmsingle) ZabbixConnectorHistory(t *testing.T, records []string, opts QueryOpts) {
+	t.Helper()
+
+	url := fmt.Sprintf("http://%s/zabbixconnector/api/v1/history", app.httpListenAddr)
+	uv := opts.asURLValues()
+	uvs := uv.Encode()
+	if len(uvs) > 0 {
+		url += "?" + uvs
+	}
+	data := []byte(strings.Join(records, "\n"))
+	_, statusCode := app.cli.Post(t, url, "application/json", data)
+	if statusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusOK)
+	}
+}
+
+// HTTPAddr returns the address at which the vminsert process is
+// listening for incoming HTTP requests.
+func (app *Vmsingle) HTTPAddr() string {
+	return app.httpListenAddr
 }
 
 // String returns the string representation of the vmsingle app state.

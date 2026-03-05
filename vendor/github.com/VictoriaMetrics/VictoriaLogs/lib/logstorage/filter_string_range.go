@@ -11,7 +11,7 @@ var maxStringRangeValue = string([]byte{255, 255, 255, 255})
 // filterStringRange matches tie given string range [minValue..maxValue)
 //
 // Note that the minValue is included in the range, while the maxValue isn't included in the range.
-// This simplifies querying distincts log sets with string_range(A, B), string_range(B, C), etc.
+// This simplifies querying distinct log sets with string_range(A, B), string_range(B, C), etc.
 //
 // Example LogsQL: `fieldName:string_range(minValue, maxValue)`
 type filterStringRange struct {
@@ -28,6 +28,11 @@ func (fr *filterStringRange) String() string {
 
 func (fr *filterStringRange) updateNeededFields(pf *prefixfilter.Filter) {
 	pf.AddAllowFilter(fr.fieldName)
+}
+
+func (fr *filterStringRange) matchRow(fields []Field) bool {
+	v := getFieldValueByName(fields, fr.fieldName)
+	return matchStringRange(v, fr.minValue, fr.maxValue)
 }
 
 func (fr *filterStringRange) applyToBlockResult(br *blockResult, bm *bitmap) {

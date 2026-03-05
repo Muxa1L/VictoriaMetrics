@@ -32,6 +32,14 @@ func (pd *pipeDelete) canLiveTail() bool {
 	return true
 }
 
+func (pd *pipeDelete) canReturnLastNResults() bool {
+	return !prefixfilter.MatchFilters(pd.fieldFilters, "_time")
+}
+
+func (pd *pipeDelete) isFixedOutputFieldsOrder() bool {
+	return false
+}
+
 func (pd *pipeDelete) updateNeededFields(pf *prefixfilter.Filter) {
 	pf.AddDenyFilters(pd.fieldFilters)
 }

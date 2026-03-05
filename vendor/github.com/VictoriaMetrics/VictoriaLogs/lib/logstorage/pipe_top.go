@@ -65,6 +65,10 @@ func (pt *pipeTop) splitToRemoteAndLocal(timestamp int64) (pipe, []pipe) {
 	if pt.rankFieldName != "" {
 		pLocalStr += rankFieldNameString(pt.rankFieldName)
 	}
+	pLocalStr += fmt.Sprintf(` | fields %s, %s`, fieldsQuoted, hitsQuoted)
+	if pt.rankFieldName != "" {
+		pLocalStr += ", " + quoteTokenIfNeeded(pt.rankFieldName)
+	}
 
 	psLocal := mustParsePipes(pLocalStr, timestamp)
 
@@ -76,6 +80,14 @@ func (pt *pipeTop) splitToRemoteAndLocal(timestamp int64) (pipe, []pipe) {
 
 func (pt *pipeTop) canLiveTail() bool {
 	return false
+}
+
+func (pt *pipeTop) canReturnLastNResults() bool {
+	return false
+}
+
+func (pt *pipeTop) isFixedOutputFieldsOrder() bool {
+	return true
 }
 
 func (pt *pipeTop) updateNeededFields(pf *prefixfilter.Filter) {
@@ -636,7 +648,7 @@ func parsePipeTop(lex *lexer) (pipe, error) {
 			if lex.isKeyword("as") {
 				lex.nextToken()
 			}
-			s, err := getCompoundToken(lex)
+			s, err := lex.nextCompoundToken()
 			if err != nil {
 				return nil, fmt.Errorf("cannot parse 'hits' name: %w", err)
 			}

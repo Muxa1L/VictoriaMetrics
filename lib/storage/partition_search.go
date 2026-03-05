@@ -75,8 +75,25 @@ func (pts *partitionSearch) Init(pt *partition, tsids []TSID, tr TimeRange) {
 		return
 	}
 
-	if pt.tr.MinTimestamp > tr.MaxTimestamp || pt.tr.MaxTimestamp < tr.MinTimestamp {
+	if !pt.tr.overlapsWith(tr) {
 		// Fast path - the partition doesn't contain rows for the given time range.
+		pts.err = io.EOF
+		return
+	}
+
+	filteredTSIDs := tsids
+	deletedMetricsIDs := pt.idb.getDeletedMetricIDs()
+	if deletedMetricsIDs.Len() > 0 {
+		filteredTSIDs = make([]TSID, 0, len(tsids))
+		for _, tsid := range tsids {
+			if !deletedMetricsIDs.Has(tsid.MetricID) {
+				filteredTSIDs = append(filteredTSIDs, tsid)
+			}
+		}
+	}
+
+	if len(filteredTSIDs) == 0 {
+		// Fast path - zero tsids.
 		pts.err = io.EOF
 		return
 	}
@@ -86,7 +103,7 @@ func (pts *partitionSearch) Init(pt *partition, tsids []TSID, tr TimeRange) {
 	// Initialize psPool.
 	pts.psPool = slicesutil.SetLength(pts.psPool, len(pts.pws))
 	for i, pw := range pts.pws {
-		pts.psPool[i].Init(pw.p, tsids, tr)
+		pts.psPool[i].Init(pw.p, filteredTSIDs, tr)
 	}
 
 	// Initialize the psHeap.

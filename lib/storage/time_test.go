@@ -1,12 +1,13 @@
 package storage
 
 import (
+	"math"
 	"testing"
 	"time"
 )
 
 func TestTimeRangeFromPartition(t *testing.T) {
-	for i := 0; i < 24*30*365; i++ {
+	for i := range 24 * 30 * 365 {
 		testTimeRangeFromPartition(t, time.Now().Add(time.Hour*time.Duration(i)))
 	}
 }
@@ -53,6 +54,51 @@ func testTimeRangeFromPartition(t *testing.T, initialTime time.Time) {
 	}
 }
 
+func TestTimeRangeOverlapsWith(t *testing.T) {
+	f := func(min1, max1, min2, max2 int64, want bool) {
+		tr1 := TimeRange{min1, max1}
+		tr2 := TimeRange{min2, max2}
+		if got := tr1.overlapsWith(tr2); got != want {
+			t.Errorf("unmet time range overlapping expectation: got %t, want %t", got, want)
+		}
+	}
+
+	f(0, 0, 0, 0, true)
+	f(0, 0, 0, 1, true)
+	f(0, 1, 0, 0, true)
+	f(1, 2, 0, 0, false)
+	f(0, 0, 1, 2, false)
+	f(1, 2, 0, 3, true)
+	f(1, 10, 5, 15, true)
+	f(5, 15, 1, 10, true)
+}
+
+func TestTimeRangeContains(t *testing.T) {
+	f := func(min, max, ts int64, want bool) {
+		tr := TimeRange{min, max}
+		if got := tr.contains(ts); got != want {
+			t.Errorf("unmet ts.contains() expectation: got %t, want %t", got, want)
+		}
+	}
+
+	f(0, 0, 0, true)
+	f(0, 0, 1, false)
+	f(0, 0, -1, false)
+
+	f(1, 3, 0, false)
+	f(1, 3, 1, true)
+	f(1, 3, 2, true)
+	f(1, 3, 3, true)
+	f(1, 3, 4, false)
+
+	f(0, math.MaxInt64, -1, false)
+	f(0, math.MaxInt64, 0, true)
+	f(0, math.MaxInt64, 1, true)
+	f(0, math.MaxInt64, math.MaxInt64/2, true)
+	f(0, math.MaxInt64, math.MaxInt64-1, true)
+	f(0, math.MaxInt64, math.MaxInt64, true)
+}
+
 func TestTimeRangeDateRange(t *testing.T) {
 	f := func(tr TimeRange, wantMinDate, wantMaxDate uint64) {
 		t.Helper()
@@ -92,6 +138,16 @@ func TestTimeRangeDateRange(t *testing.T) {
 	// the same as min date.
 	tr = TimeRange{2*msecPerDay + 654, 1*msecPerDay + 321}
 	f(tr, 2, 2)
+
+	// MaxTimestamp is the last millisecond of the day.
+	// Max date should be the next date
+	tr = TimeRange{1*msecPerDay + 123, 2 * msecPerDay}
+	f(tr, 1, 2)
+
+	// MaxTimestamp is the first millisecond of the day.
+	// Max date should be the next date
+	tr = TimeRange{1*msecPerDay + 123, 2*msecPerDay + 1}
+	f(tr, 1, 2)
 }
 
 func TestDateToString(t *testing.T) {

@@ -44,6 +44,15 @@ func (fa *filterAnd) updateNeededFields(pf *prefixfilter.Filter) {
 	}
 }
 
+func (fa *filterAnd) matchRow(fields []Field) bool {
+	for _, f := range fa.filters {
+		if !f.matchRow(fields) {
+			return false
+		}
+	}
+	return true
+}
+
 func (fa *filterAnd) applyToBlockResult(br *blockResult, bm *bitmap) {
 	for _, f := range fa.filters {
 		f.applyToBlockResult(br, bm)
@@ -143,6 +152,9 @@ func getCommonTokensForAndFilters(filters []filter) []fieldTokens {
 		case *filterExactPrefix:
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
+		case *filterPatternMatch:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
 		case *filterPhrase:
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
@@ -153,6 +165,9 @@ func getCommonTokensForAndFilters(filters []filter) []fieldTokens {
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
 		case *filterSequence:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterSubstring:
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
 		case *filterOr:

@@ -64,7 +64,7 @@ type statsCountUniqProcessor struct {
 // the maximum number of values to track in statsCountUniqProcessor.uniqValues before switching to statsCountUniqProcessor.shards
 //
 // Too big value may slow down mergeState() across big number of CPU cores.
-// Too small value may significantly increase RAM usage when coun_uniq() is applied individually to big number of groups.
+// Too small value may significantly increase RAM usage when count_uniq() is applied individually to big number of groups.
 const statsCountUniqValuesMaxLen = 4 << 10
 
 type statsCountUniqSet struct {
@@ -151,7 +151,7 @@ func unmarshalUint64Set(dst *map[uint64]struct{}, src []byte, stopCh <-chan stru
 		return src, 0, fmt.Errorf("cannot unmarshal %d uint64 values from %d bytes; need %d bytes", entriesLen, len(src), 8*entriesLen)
 	}
 	m := make(map[uint64]struct{}, entriesLen)
-	for i := uint64(0); i < entriesLen; i++ {
+	for range entriesLen {
 		u64 := encoding.UnmarshalUint64(src)
 		src = src[8:]
 
@@ -195,7 +195,7 @@ func unmarshalStringSet(a *chunkedAllocator, dst *map[string]struct{}, src []byt
 	stateSize := 0
 
 	m := make(map[string]struct{}, entriesLen)
-	for i := uint64(0); i < entriesLen; i++ {
+	for range entriesLen {
 		v, n := encoding.UnmarshalBytes(src)
 		if n <= 0 {
 			return src, 0, fmt.Errorf("cannot unmarshal string entry")
@@ -346,7 +346,7 @@ func (sup *statsCountUniqProcessor) updateStatsForAllRows(sf statsFunc, br *bloc
 	sup.columnValues = columnValues
 
 	keyBuf := sup.keyBuf[:0]
-	for i := 0; i < br.rowsLen; i++ {
+	for i := range br.rowsLen {
 		seenKey := true
 		for _, values := range columnValues {
 			if i == 0 || values[i-1] != values[i] {
@@ -638,10 +638,6 @@ func (sup *statsCountUniqProcessor) importState(src []byte, stopCh <-chan struct
 		return stateSize, nil
 	}
 
-	if shardsLen != uint64(sup.concurrency) {
-		return 0, fmt.Errorf("unexpected number of imported shards: %d; want %d", shardsLen, sup.concurrency)
-	}
-
 	shards := make([]statsCountUniqSet, shardsLen)
 	stateSizeIncrease := int(unsafe.Sizeof(shards[0])) * len(shards)
 	for i := range shards {
@@ -656,9 +652,44 @@ func (sup *statsCountUniqProcessor) importState(src []byte, stopCh <-chan struct
 	if len(src) > 0 {
 		return 0, fmt.Errorf("unexpected tail left after importing shards' state; len(tail)=%d", len(src))
 	}
-	sup.shards = shards
+
+	stateSizeIncrease = sup.importShards(shards, stateSizeIncrease)
 
 	return stateSizeIncrease, nil
+}
+
+func (sup *statsCountUniqProcessor) importShards(shards []statsCountUniqSet, stateSizeIncrease int) int {
+	if uint(len(shards)) == sup.concurrency {
+		// Fast path - nothing to reshard
+		sup.shards = shards
+		return stateSizeIncrease
+	}
+
+	// Slow path - reshard shards in order to align len(shards) with sup.concurrency.
+	// This case is possible when the remote side has different concurrency than the sup.concurrency.
+	// See https://github.com/VictoriaMetrics/VictoriaLogs/issues/682
+	stateSizeIncrease = 0
+	for i := range shards {
+		stateSizeIncrease += sup.importShard(&shards[i])
+	}
+	return stateSizeIncrease
+}
+
+func (sup *statsCountUniqProcessor) importShard(shard *statsCountUniqSet) int {
+	stateSizeIncrease := 0
+	for ts := range shard.timestamps {
+		stateSizeIncrease += sup.updateStateTimestamp(int64(ts))
+	}
+	for n := range shard.u64 {
+		stateSizeIncrease += sup.updateStateUint64(n)
+	}
+	for n := range shard.negative64 {
+		stateSizeIncrease += sup.updateStateNegativeInt64(int64(n))
+	}
+	for s := range shard.strings {
+		stateSizeIncrease += sup.updateStateString(bytesutil.ToUnsafeBytes(s))
+	}
+	return stateSizeIncrease
 }
 
 func (sup *statsCountUniqProcessor) finalizeStats(sf statsFunc, dst []byte, stopCh <-chan struct{}) []byte {
@@ -688,18 +719,15 @@ func (sup *statsCountUniqProcessor) mergeShardssParallel(stopCh <-chan struct{})
 
 	result := make([]statsCountUniqSet, len(shardss[0]))
 	var wg sync.WaitGroup
-	for i := range result {
-		wg.Add(1)
-		go func(cpuIdx int) {
-			defer wg.Done()
-
+	for cpuIdx := range result {
+		wg.Go(func() {
 			sus := &shardss[0][cpuIdx]
 			for _, perCPU := range shardss[1:] {
 				sus.mergeState(&perCPU[cpuIdx], stopCh)
 				perCPU[cpuIdx].reset()
 			}
 			result[cpuIdx] = *sus
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -840,7 +868,7 @@ func (sup *statsCountUniqProcessor) limitReached(su *statsCountUniq) bool {
 	return sup.entriesCount() > limit
 }
 
-func parseStatsCountUniq(lex *lexer) (*statsCountUniq, error) {
+func parseStatsCountUniq(lex *lexer) (statsFunc, error) {
 	fields, err := parseStatsFuncFields(lex, "count_uniq")
 	if err != nil {
 		return nil, err
@@ -852,12 +880,10 @@ func parseStatsCountUniq(lex *lexer) (*statsCountUniq, error) {
 		fields: fields,
 	}
 	if lex.isKeyword("limit") {
-		lex.nextToken()
-		n, ok := tryParseUint64(lex.token)
-		if !ok {
-			return nil, fmt.Errorf("cannot parse 'limit %s' for 'count_uniq': %w", lex.token, err)
+		n, err := parseLimit(lex)
+		if err != nil {
+			return nil, err
 		}
-		lex.nextToken()
 		su.limit = n
 	}
 	return su, nil

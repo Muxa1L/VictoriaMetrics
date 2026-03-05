@@ -9,7 +9,7 @@ import (
 
 // filterOr contains filters joined by OR operator.
 //
-// It is epxressed as `f1 OR f2 ... OR fN` in LogsQL.
+// It is expressed as `f1 OR f2 ... OR fN` in LogsQL.
 type filterOr struct {
 	filters []filter
 
@@ -31,6 +31,15 @@ func (fo *filterOr) updateNeededFields(pf *prefixfilter.Filter) {
 	for _, f := range fo.filters {
 		f.updateNeededFields(pf)
 	}
+}
+
+func (fo *filterOr) matchRow(fields []Field) bool {
+	for _, f := range fo.filters {
+		if f.matchRow(fields) {
+			return true
+		}
+	}
+	return false
 }
 
 func (fo *filterOr) applyToBlockResult(br *blockResult, bm *bitmap) {
@@ -147,6 +156,9 @@ func getCommonTokensForOrFilters(filters []filter) []fieldTokens {
 		case *filterExactPrefix:
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
+		case *filterPatternMatch:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
 		case *filterPhrase:
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
@@ -157,6 +169,9 @@ func getCommonTokensForOrFilters(filters []filter) []fieldTokens {
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
 		case *filterSequence:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterSubstring:
 			tokens := t.getTokens()
 			mergeFieldTokens(t.fieldName, tokens)
 		case *filterAnd:

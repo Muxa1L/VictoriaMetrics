@@ -14,6 +14,12 @@ const (
 	globalSilent             = "s"
 	globalVerbose            = "verbose"
 	globalDisableProgressBar = "disable-progress-bar"
+
+	globalPushMetricsURL         = "pushmetrics.url"
+	globalPushMetricsInterval    = "pushmetrics.interval"
+	globalPushExtraLabels        = "pushmetrics.extraLabel"
+	globalPushHeaders            = "pushmetrics.header"
+	globalPushDisableCompression = "pushmetrics.disableCompression"
 )
 
 var (
@@ -32,6 +38,29 @@ var (
 			Name:  globalDisableProgressBar,
 			Value: false,
 			Usage: "Whether to disable progress bar during the import.",
+		},
+		&cli.StringSliceFlag{
+			Name:  globalPushMetricsURL,
+			Usage: "Optional URL to push metrics. See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#push-metrics",
+		},
+		&cli.DurationFlag{
+			Name:  globalPushMetricsInterval,
+			Value: 10 * time.Second,
+			Usage: "Interval for pushing metrics to every -pushmetrics.url",
+		},
+		&cli.StringSliceFlag{
+			Name: globalPushExtraLabels,
+			Usage: "Extra labels to add to pushed metrics. In case of collision, label value defined by flag will have priority. " +
+				"Flag can be set multiple times, to add few additional labels. " +
+				"For example, -pushmetrics.extraLabel='instance=\"foo\"' adds instance=\"foo\" label to all the metrics pushed to every -pushmetrics.url",
+		},
+		&cli.StringSliceFlag{
+			Name:  globalPushHeaders,
+			Usage: "Optional HTTP headers to add to pushed metrics. Flag can be set multiple times, to add few additional headers.",
+		},
+		&cli.BoolFlag{
+			Name:  globalPushDisableCompression,
+			Usage: "Whether to disable compression when pushing metrics.",
 		},
 	}
 )
@@ -123,32 +152,32 @@ var (
 			Name:  vmExtraLabel,
 			Value: nil,
 			Usage: "Extra labels, that will be added to imported timeseries. In case of collision, label value defined by flag" +
-				"will have priority. Flag can be set multiple times, to add few additional labels.",
+				" will have priority. Flag can be set multiple times, to add few additional labels.",
 		},
 		&cli.Int64Flag{
 			Name: vmRateLimit,
 			Usage: "Optional data transfer rate limit in bytes per second.\n" +
-				"By default, the rate limit is disabled. It can be useful for limiting load on configured via '--vmAddr' destination.",
+				"By default, the rate limit is disabled. It can be useful for limiting load on configured via '--vm-addr' destination.",
 		},
 		&cli.StringFlag{
 			Name:  vmCertFile,
-			Usage: "Optional path to client-side TLS certificate file to use when connecting to '--vmAddr'",
+			Usage: "Optional path to client-side TLS certificate file to use when connecting to '--vm-addr'",
 		},
 		&cli.StringFlag{
 			Name:  vmKeyFile,
-			Usage: "Optional path to client-side TLS key to use when connecting to '--vmAddr'",
+			Usage: "Optional path to client-side TLS key to use when connecting to '--vm-addr'",
 		},
 		&cli.StringFlag{
 			Name:  vmCAFile,
-			Usage: "Optional path to TLS CA file to use for verifying connections to '--vmAddr'. By default, system CA is used",
+			Usage: "Optional path to TLS CA file to use for verifying connections to '--vm-addr'. By default, system CA is used",
 		},
 		&cli.StringFlag{
 			Name:  vmServerName,
-			Usage: "Optional TLS server name to use for connections to '--vmAddr'. By default, the server name from '--vmAddr' is used",
+			Usage: "Optional TLS server name to use for connections to '--vm-addr'. By default, the server name from '--vm-addr' is used",
 		},
 		&cli.BoolFlag{
 			Name:  vmInsecureSkipVerify,
-			Usage: "Whether to skip tls verification when connecting to '--vmAddr'",
+			Usage: "Whether to skip tls verification when connecting to '--vm-addr'",
 			Value: false,
 		},
 		&cli.IntFlag{
@@ -468,7 +497,7 @@ var (
 			Name: vmNativeFilterMatch,
 			Usage: "Time series selector to match series for export. For example, select {instance!=\"localhost\"} will " +
 				"match all series with \"instance\" label different to \"localhost\".\n" +
-				" See more details here https://github.com/VictoriaMetrics/VictoriaMetrics#how-to-export-data-in-native-format",
+				" See more details here https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-export-data-in-native-format",
 			Value: `{__name__!=""}`,
 		},
 		&cli.StringFlag{
@@ -598,7 +627,7 @@ var (
 			Name:  vmExtraLabel,
 			Value: nil,
 			Usage: "Extra labels, that will be added to imported timeseries. In case of collision, label value defined by flag" +
-				"will have priority. Flag can be set multiple times, to add few additional labels.",
+				" will have priority. Flag can be set multiple times, to add few additional labels.",
 		},
 		&cli.Int64Flag{
 			Name: vmRateLimit,
@@ -625,8 +654,8 @@ var (
 		&cli.BoolFlag{
 			Name: vmNativeDisableBinaryProtocol,
 			Usage: "Whether to use https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-export-data-in-json-line-format " +
-				"instead of https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-export-data-in-native-format API." +
-				"Binary export/import API protocol implies less network and resource usage, as it transfers compressed binary data blocks." +
+				"instead of https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#how-to-export-data-in-native-format API. " +
+				"Binary export/import API protocol implies less network and resource usage, as it transfers compressed binary data blocks. " +
 				"Non-binary export/import API is less efficient, but supports deduplication if it is configured on vm-native-src-addr side.",
 			Value: false,
 		},
@@ -689,15 +718,15 @@ var (
 			Usage:  "The time filter in RFC3339 format to select timeseries with timestamp equal or lower than provided value. E.g. '2020-01-01T20:07:00Z'",
 			Layout: time.RFC3339,
 		},
-		&cli.StringFlag{
-			Name:  remoteReadFilterLabel,
-			Usage: "Prometheus label name to filter timeseries by. E.g. '__name__' will filter timeseries by name.",
-			Value: "__name__",
+		&cli.StringSliceFlag{
+			Name:        remoteReadFilterLabel,
+			Usage:       "Prometheus label name to filter timeseries by. E.g. '__name__' will filter timeseries by name.",
+			DefaultText: "__name__",
 		},
-		&cli.StringFlag{
-			Name:  remoteReadFilterLabelValue,
-			Usage: fmt.Sprintf("Prometheus regular expression to filter label from %q flag.", remoteReadFilterLabelValue),
-			Value: ".*",
+		&cli.StringSliceFlag{
+			Name:        remoteReadFilterLabelValue,
+			Usage:       fmt.Sprintf("Prometheus regular expression to filter label from %q flag.", remoteReadFilterLabelValue),
+			DefaultText: ".*",
 		},
 		&cli.BoolFlag{
 			Name:  remoteRead,

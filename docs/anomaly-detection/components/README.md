@@ -14,16 +14,17 @@ This chapter describes different components, that correspond to respective secti
 - [Writer section](https://docs.victoriametrics.com/anomaly-detection/components/writer/) - Required
 - [Monitoring section](https://docs.victoriametrics.com/anomaly-detection/components/monitoring/) -  Optional
 - [Settings section](https://docs.victoriametrics.com/anomaly-detection/components/settings/) - Optional
+- [Server section](https://docs.victoriametrics.com/anomaly-detection/components/server/) - Optional
 
-> Once the service starts, automated config validation is performed{{% available_from "v1.7.2" anomaly %}}. Please see container logs for errors that need to be fixed to create fully valid config, visiting sections above for examples and documentation.
+> Once the service starts, automated config validation is performed {{% available_from "v1.7.2" anomaly %}}. Please see container logs for errors that need to be fixed to create fully valid config, visiting sections above for examples and documentation.
 
-> Components' class{{% available_from "v1.13.0" anomaly %}} can be referenced by a short alias instead of a full class path - i.e. `model.zscore.ZscoreModel` becomes `zscore`, `reader.vm.VmReader` becomes `vm`, `scheduler.periodic.PeriodicScheduler` becomes `periodic`, etc. Please see according sections for the details.
+> Components' class {{% available_from "v1.13.0" anomaly %}} can be referenced by a short alias instead of a full class path - i.e. `model.zscore.ZscoreModel` becomes `zscore`, `reader.vm.VmReader` becomes `vm`, `scheduler.periodic.PeriodicScheduler` becomes `periodic`, etc. Please see according sections for the details.
 
-> `preset` modes are available{{% available_from "v1.13.0" anomaly %}} for `vmanomaly`. Please find the guide [here](https://docs.victoriametrics.com/anomaly-detection/presets/).
+> `preset` modes are available {{% available_from "v1.13.0" anomaly %}} for `vmanomaly`. Please find the guide [here](https://docs.victoriametrics.com/anomaly-detection/presets/).
 
 ## Components interaction
 
-Below, you will find an example illustrating how the components of `vmanomaly` interact with each other and with a single-node VictoriaMetrics setup.
+Below, you will find an example illustrating how the components of `vmanomaly` interact with each other and with a VictoriaMetrics or VictoriaLogs/VictoriaTraces datasource.
 
 > [Reader](https://docs.victoriametrics.com/anomaly-detection/components/reader/#vm-reader) and [Writer](https://docs.victoriametrics.com/anomaly-detection/components/writer/#vm-writer) also support [multitenancy](https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/#multitenancy), so you can read/write from/to different locations - see `tenant_id` param description.
 
@@ -38,41 +39,45 @@ settings:
   n_workers: 4  # number of workers to run models in parallel
   anomaly_score_outside_data_range: 5.0  # default anomaly score for anomalies outside expected data range
   restore_state: True  # restore state from previous run, if available
+  retention:  # how long to keep stale models on disk/in memory
+    ttl: "1d"  # time-to-live duration, if the model was not used for inference within this duration, it will be considered stale
+    check_every: "1h"  # how often to check for stale models and remove them
 
 # how and when to run the models is defined by schedulers
 # https://docs.victoriametrics.com/anomaly-detection/components/scheduler/
 schedulers:
-  periodic_1d:  # alias
+  periodic_online:  # alias
     class: 'periodic' # scheduler class
-    infer_every: "30s"
-    fit_every: "1d"
-    fit_window: "24h"
+    infer_every: "30s"  # how often to produce anomaly scores for new data
+    fit_every: "365d"  # how often to re-fit the models, for online models used effectively once, then they are updated with new data and won't require re-fit
+    fit_window: "3d"  # how much historical data to use for fit stage
     start_from: "00:00"  # start from specified time, i.e. 00:00 given timezone and do daily fits as `fit_every` is 1 day
     tz: "Europe/Kyiv"  # timezone to use for start_from
-  periodic_1w:
+  periodic_offline_1w:
     class: 'periodic'
     infer_every: "15m"
-    fit_every: "1h"
-    fit_window: "7d"
+    fit_every: "24h"
+    fit_window: "14d"
     # if no start_from is specified, jobs will start immediately after service starts
 
 # what model types and with what hyperparams to run on your data
 # https://docs.victoriametrics.com/anomaly-detection/components/models/
 models:
   zscore:  # we can set up alias for model
-    class: 'zscore'  # model class
+    class: 'zscore_online'  # model class
     z_threshold: 3.5
-    provide_series: ['anomaly_score']  # what series to produce
+    decay: 0.99  # weight for data points value should be in (0, 1], 1 means to give equal weight to all data
+    provide_series: ['anomaly_score', 'y', 'yhat', 'yhat_upper']  # what series to produce as output of the model
     queries: ['host_network_receive_errors']  # what queries to run particular model on
-    schedulers: ['periodic_1d']  # will be attached to 1-day schedule, fit every 10m and infer every 30s
+    schedulers: ['periodic_online']  # will be fit once, used for infer every 30s
     min_dev_from_expected: 0.0  # turned off. if |y - yhat| < min_dev_from_expected, anomaly score will be 0
     detection_direction: 'above_expected' # detect anomalies only when y > yhat, "peaks"
     clip_predictions: True  # clip predictions to expected data range, i.e. [0, inf] for this query `host_network_receive_errors
-  prophet: # we can set up alias for model
+  prophet_weekly: # we can set up alias for model
     class: 'prophet'
-    provide_series: ['anomaly_score', 'yhat', 'yhat_lower', 'yhat_upper']
+    provide_series: ['anomaly_score', 'y', 'yhat', 'yhat_lower', 'yhat_upper']
     queries: ['cpu_seconds_total']
-    schedulers: ['periodic_1w']  # will be attached to 1-week schedule, fit every 1h and infer every 15m
+    schedulers: ['periodic_offline_1w']  # will be attached to 1-week scheduler, re-fit every 24h and infer every 15m
     min_dev_from_expected: [0.01, 0.01]  # minimum deviation from expected value to be even considered as anomaly
     anomaly_score_outside_data_range: 1.5  # override default anomaly score outside expected data range
     detection_direction: 'above_expected'
@@ -90,6 +95,8 @@ reader:
   sampling_period: "30s"  # what data resolution to fetch from VictoriaMetrics' /query_range endpoint
   latency_offset: '1ms'
   query_from_last_seen_timestamp: False
+  tz: "UTC"  # timezone to use for queries without explicit timezone
+  "offset": "0s"  # offset to apply to all queries, e.g. to account for data delays, can be overridden on per-query basis
   queries:  # aliases to MetricsQL expressions
     cpu_seconds_total:
       expr: 'avg(rate(node_cpu_seconds_total[5m])) by (mode)' 
@@ -105,34 +112,48 @@ reader:
 writer:
   datasource_url: "http://victoriametrics:8428/"
   # tenant_id: "0:0"  # for VictoriaMetrics cluster, can support "multitenant"
+  # https://docs.victoriametrics.com/anomaly-detection/components/writer/#metrics-formatting
+  metric_format:
+    __name__: $VAR
+    for: $QUERY_KEY
+    
 
 # enable self-monitoring in pull and/or push mode
 # https://docs.victoriametrics.com/anomaly-detection/components/monitoring/
 monitoring:
-  pull: # Enable /metrics endpoint.
-    addr: "0.0.0.0"
-    port: 8490
+  # pull: # Enable /metrics endpoint.
+  #   addr: "0.0.0.0"
+  #   port: 8490
 
   push: # Enable pushing self-monitoring metrics
     url: "http://victoriametrics:8428"
     push_frequency: "15m"  # how often to push self-monitoring metrics
+
+# configure vmanomaly server and UI settings
+# https://docs.victoriametrics.com/anomaly-detection/components/server/
+server:
+  port: 8490
+  path_prefix: '/vmanomaly'  # optional path prefix for all HTTP routes
+  max_concurrent_tasks: 4  # maximum number of concurrent anomaly detection tasks processed by backend
+  uvicorn_config:  # optional Uvicorn server configuration
+    log_level: 'warning'
 ```
 
 ## Hot reload
 
-> This feature is better used in conjunction with [stateful service](https://docs.victoriametrics.com/anomaly-detection/components/settings#state-restoration) to preserve the state of the models and schedulers between restarts and reuse what can be reused, thus avoiding unnecessary re-training of models, re-initialization of schedulers and re-reading of data.
+> This feature is better used in conjunction with [stateful service](https://docs.victoriametrics.com/anomaly-detection/components/settings/#state-restoration) to preserve the state of the models and schedulers between restarts and reuse what can be reused, thus avoiding unnecessary re-training of models, re-initialization of schedulers and re-reading of data.
 
 {{% available_from "v1.25.0" anomaly %}} Service supports hot reload of configuration files, which allows for automatic reloading of configurations on config files change filesystem events without the need of explicit service restart. This can be enabled via the `--watch` [CLI argument](https://docs.victoriametrics.com/anomaly-detection/quickstart/#command-line-arguments). `vmanomaly_hot_reload_enabled` flag in [self-monitoring metrics](https://docs.victoriametrics.com/anomaly-detection/components/monitoring/#startup-metrics) will be set to 1 (if enabled) or 0 (if disabled).
 
 ### How it works
 
-It works by watching for file system events, such as modifications, creations, or deletions of `.yml|.yaml` files in the specified directories. When a change is detected, the service will attempt to reload the configuration files, rebuild the [global config](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly#global-config) and reinitialize the components. If the reload is successful, the `vmanomaly_hot_reload_events_total` metric will be incremented for `status="success"` label, otherwise it will be incremented with `status="failure"` label and a respective error message on config validation failure(s) will be logged.
+It works by watching for file system events, such as modifications, creations, or deletions of `.yml|.yaml` files in the specified directories. When a change is detected, the service will attempt to reload the configuration files, rebuild the [global config](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly/#global-config) and reinitialize the components. If the reload is successful, the `vmanomaly_hot_reload_events_total` metric will be incremented for `status="success"` label, otherwise it will be incremented with `status="failure"` label and a respective error message on config validation failure(s) will be logged.
 
 > If the reload fails, the service will log an error message indicating the reason for the failure, and the **previous configuration will remain active until a successful reload occurs** to preserve the service's stability. This means that if there are errors in the new configuration, the service will continue to operate with the last valid configuration until the issues are resolved.
 
-If used on [sharded setup](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly#horizontal-scalability), upon [global config](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly#global-config) change, all shards will be reinitialized with the new configurations.
+If used on [sharded setup](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly/#horizontal-scalability), upon [global config](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly/#global-config) change, all shards will be reinitialized with the new configurations.
 
-> Please note, that even if [state restoration](https://docs.victoriametrics.com/anomaly-detection/components/settings#state-restoration) is enabled, the models, queries and schedulers might "migrate" to new shards if the order or the amount of [sub-configs](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly#sub-configuration) changes after new config is hot-reloaded, so the state restoration won't be **fully** efficient in this case.
+> Please note, that even if [state restoration](https://docs.victoriametrics.com/anomaly-detection/components/settings/#state-restoration) is enabled, the models, queries and schedulers might "migrate" to new shards if the order or the amount of [sub-configs](https://docs.victoriametrics.com/anomaly-detection/scaling-vmanomaly/#sub-configuration) changes after new config is hot-reloaded, so the state restoration won't be **fully** efficient in this case.
 
 ### Example
 
