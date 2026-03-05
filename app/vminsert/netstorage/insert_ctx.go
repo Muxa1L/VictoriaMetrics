@@ -139,7 +139,6 @@ func (ctx *InsertCtx) WriteDataPoint(at *auth.Token, labels []prompb.Label, time
 //
 // caller must invoke TryPrepareLabels before using this function
 func (ctx *InsertCtx) WriteDataPointExt(storageNodeIdx int, metricNameRaw []byte, timestamp int64, value float64) error {
-	br := &ctx.bufRowss[storageNodeIdx]
 	snb := ctx.snb
 	sn := snb.sns[storageNodeIdx]
 	if dropSamplesOlderThan.Milliseconds() > 0 {
@@ -148,6 +147,7 @@ func (ctx *InsertCtx) WriteDataPointExt(storageNodeIdx int, metricNameRaw []byte
 			return nil
 		}
 	}
+	br := &ctx.bufRowss[storageNodeIdx]
 	bufNew := storage.MarshalMetricRow(br.buf, metricNameRaw, timestamp, value)
 	if len(bufNew) >= maxBufSizePerStorageNode {
 		// Send buf to sn, since it is too big.
